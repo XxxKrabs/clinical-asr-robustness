@@ -9,7 +9,6 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-
 CANVAS_W = 1800
 CANVAS_H = 1280
 MARGIN = 70

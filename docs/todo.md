@@ -108,6 +108,7 @@ wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python
 
 | 日期 | 任务 | 产出/位置 |
 |---|---|---|
+| 2026-07-02 | 生成第 1 周暑期实践周报与可视化资产 | LaTeX 周报位于 `docs/week1_practice_report.tex`；图生成脚本为 `scripts/generate_weekly_report_assets.py`；周报图位于 `outputs/reports/week1_asr_confidence_review_summary.png`。 |
 | 2026-07-02 | 修正 T028 entropy confidence 默认归一化与 demo 全红问题 | `scripts/export_nemo_asr_confidence.py` 新增 `--confidence-method`、`--entropy-type`、`--entropy-norm`、`--confidence-alpha`，默认改为 `entropy_norm=lin`；`src/clinical_asr_robustness/nemo_confidence_export.py` 增加可配置 confidence 方法与分布统计；已重跑 `outputs/primock57/t028_nemo_asr_confidence/primock57_asr_confidence_limit2.jsonl`、T029/T030/T036，新的 HTML 位于 `outputs/primock57/t036_doctor_review_demo/doctor_review_demo.html`。 |
 | 2026-07-02 | T037 真实 NeMo n-best 候选接入并重跑审阅 demo | `src/clinical_asr_robustness/nemo_nbest_export.py`、`scripts/export_nemo_asr_nbest.py`、`docs/t037_nemo_asr_nbest_demo.md`、`tests/test_nemo_nbest_export.py`；本地输出位于 `outputs/primock57/t037_nemo_asr_nbest/`、`outputs/primock57/t029_asr_nbest_candidates/`、`outputs/primock57/t030_review_samples/`、`outputs/primock57/t036_doctor_review_demo/`；初次 T037 接入验证通过，后续 confidence 修正已重跑当前 demo。 |
 | 2026-07-02 | T030/T035/T036 ASR 审阅样本、反馈回放与 HTML demo | `src/clinical_asr_robustness/review_workflow.py`、`scripts/build_asr_review_samples.py`、`scripts/apply_asr_review_feedback.py`、`scripts/build_doctor_review_demo_html.py`、`docs/t030_t035_t036_review_workflow.md`、`tests/test_review_workflow.py`；第一版先跑通无候选界面，T037 完成后已重跑为带真实 ASR 候选版本。 |

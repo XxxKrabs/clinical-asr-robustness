@@ -290,3 +290,28 @@
   - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_nemo_confidence_export.py tests/test_asr_confidence_schema.py --basetemp=.pytest_tmp`：8 passed。
   - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check src scripts tests`：All checks passed。
 - 遗留：当前阈值仍是 demo 启发式阈值。T031 应用 reference 做 confidence 校准、分桶错误率、ECE/NCE 和 top-k 覆盖评估；`entropy_norm=exp`、`max_prob`、不同 `alpha/aggregation` 可作为消融。
+
+### 2026-07-02：生成第 1 周暑期实践周报与可视化资产
+
+- 完成：
+  - 按用户给定模板生成第 1 周周报 LaTeX，主题为“面向临床语音转写噪声的病例信息整理与鲁棒性评估”。
+  - 周报重点说明本周已形成的 ASR 置信度交互审阅最小闭环、当前结果含义、问题判断和下周交付计划。
+  - 新增周报图生成脚本，读取 T028/T029/T030/T036/T037 run summary，生成不含 transcript 正文和患者身份信息的 PNG 摘要图。
+- 修改文件：
+  - `docs/week1_practice_report.tex`
+  - `scripts/generate_weekly_report_assets.py`
+  - `outputs/reports/week1_asr_confidence_review_summary.png`
+  - `docs/todo.md`
+  - `docs/task_records.md`
+- 周报采用的关键统计：
+  - `limit2` 两路 PriMock57 音频；
+  - 1145 个 ASR 词，其中 1031 green、114 yellow、0 red；
+  - 74 个黄色待审阅 span，其中 2 个带 ASR 候选；
+  - 10 个 sequence-level n-best，2 个 span alternatives；
+  - HTML demo 支持 `accept_asr`、`select_alternative`、`manual_edit`、`reject`、`unable_to_judge`。
+- 验证：
+  - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/generate_weekly_report_assets.py`：成功生成 `outputs/reports/week1_asr_confidence_review_summary.png`。
+  - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check scripts/generate_weekly_report_assets.py`：All checks passed。
+- 遗留问题：
+  - 未在本地编译 LaTeX PDF；用户要求只提供 LaTeX，自行生成 PDF。
+  - 下周仍应优先推进 T031/T032，即 confidence/top-k 初评与 ASR 输出层最小闭环实验记录。
