@@ -1,0 +1,64 @@
+# 数据集配置样例。真实路径请复制为 datasets.local.yaml 后再修改。
+# 注意：不要把受限数据、真实病例数据或本地绝对路径提交到 Git。
+
+datasets:
+  displace_m_2026:
+    enabled: false
+    access: "需要挑战注册和数据使用条款"
+    language: "多语种/代码混合"
+    modality: ["audio", "transcript", "metadata"]
+    recommended_use:
+      - "真实声学环境下的 ASR 鲁棒性评估"
+      - "说话人分离和重叠说话分析"
+      - "医疗对话摘要"
+    local_path: null
+
+  afrispeech_dialog:
+    enabled: false
+    access: "公开数据，使用前仍需检查许可"
+    language: "英语为主，含非洲口音"
+    modality: ["audio", "dialogue"]
+    recommended_use:
+      - "口音导致的 ASR 错误分析"
+      - "长对话摘要与信息抽取"
+    local_path: null
+
+  aci_bench:
+    enabled: false
+    access: "公开基准，使用前检查许可"
+    language: "英语"
+    modality: ["text"]
+    recommended_use:
+      - "文本侧历史资产、界面假数据和下游评估参考"
+      - "doctor/patient speaker tag swap 分析"
+    local_path: null
+
+  primock57:
+    enabled: false
+    access: "公开医患模拟访谈，使用前检查许可"
+    language: "英语"
+    modality: ["audio", "manual_transcript"]
+    recommended_use:
+      - "用人工转录作为 clean/reference"
+      - "自行运行 ASR 构建 noisy transcript、置信度和医生交互样本"
+    local_path: null
+
+  fareez_osce:
+    enabled: false
+    access: "公开医患 OSCE 访谈，使用前检查许可"
+    language: "英语"
+    modality: ["audio", "manual_transcript"]
+    recommended_use:
+      - "用人工转录作为 clean/reference"
+      - "自行运行 ASR 构建 noisy transcript、置信度和医生交互样本"
+    local_path: null
+
+  meddial_dialogue_audio:
+    enabled: false
+    access: "公开或合成数据，使用前检查许可"
+    language: "英语"
+    modality: ["audio", "synthetic_dialogue"]
+    recommended_use:
+      - "不同信噪比下的 ASR 鲁棒性实验"
+      - "白噪声和医院环境噪声对下游任务影响"
+    local_path: null

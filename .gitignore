@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.pytest_tmp/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 虚拟环境
+.venv/
+.venv-wsl/
+venv/
+env/
+
+# 本地配置与密钥
+.env
+.env.*
+!.env.example
+configs/*.local.yaml
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 数据与实验输出：默认不提交真实数据或大文件
+data/raw/*
+data/external/*
+data/interim/*
+data/processed/*
+outputs/*
+
+!data/raw/.gitkeep
+!data/external/.gitkeep
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+!outputs/.gitkeep
+!data/README.md
+!outputs/README.md
+
+# 常见大文件
+*.wav
+*.mp3
+*.flac
+*.mp4
+*.m4a
+*.parquet
+*.arrow
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.ckpt
+*.nemo
+
+# 系统文件
+.DS_Store
+Thumbs.db

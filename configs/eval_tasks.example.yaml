@@ -1,0 +1,47 @@
+# 下游任务与指标配置样例。
+
+tasks:
+  symptom_extraction:
+    description: "从转写文本中抽取症状、持续时间、严重程度、否定症状等结构化信息"
+    input_variants: ["clean_transcript", "raw_asr_transcript", "confirmed_transcript"]
+    metrics:
+      - "exact_match"
+      - "micro_f1"
+      - "negation_consistency"
+    key_error_types:
+      - "medical_term_error"
+      - "negation_omission"
+      - "speaker_confusion"
+
+  case_summary:
+    description: "生成病例摘要，包括主诉、现病史、既往史、用药、检查和计划"
+    input_variants: ["clean_transcript", "raw_asr_transcript", "confirmed_transcript"]
+    metrics:
+      - "rouge_l"
+      - "bert_score_or_embedding_similarity"
+      - "clinically_relevant_error_count"
+    key_error_types:
+      - "drug_name_error"
+      - "medical_term_error"
+      - "omitted_finding"
+
+  plan_extraction:
+    description: "整理诊疗计划、随访建议、药物调整和检查安排"
+    input_variants: ["clean_transcript", "raw_asr_transcript", "confirmed_transcript"]
+    metrics:
+      - "micro_f1"
+      - "plan_item_accuracy"
+      - "speaker_attribution_accuracy"
+    key_error_types:
+      - "speaker_confusion"
+      - "drug_name_error"
+      - "dosage_error"
+
+noise_error_taxonomy:
+  medical_term_error: "医学术语识别错误，例如 disease / procedure / symptom 名称错写"
+  drug_name_error: "药名、剂量或频次错误"
+  negation_omission: "否定词遗漏或极性翻转，例如 no chest pain 被识别为 chest pain"
+  speaker_confusion: "医生和患者说话人标签互换或归属错误"
+  overlap_or_interruption: "重叠说话、插话导致的信息缺失"
+  disfluency_or_filler: "口吃、重复、填充词影响信息整理"
+  code_switching_error: "多语种或代码混合导致的转写错误"

@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+import csv
+import json
+
+from clinical_asr_robustness.asr_confidence import (
+    AlignmentDiagnostics,
+    AlternativeScope,
+    ASRAlternative,
+    ASRConfidenceConfig,
+    ASRConfidenceRecord,
+    ASRDecodingConfig,
+    ASRModelInfo,
+    ASRSegment,
+    ASRWord,
+    SourceChannel,
+    UncertainSpan,
+)
+from clinical_asr_robustness.review_workflow import (
+    ConfirmationStatus,
+    DoctorFeedbackEntry,
+    DoctorFeedbackLog,
+    ReviewFeedbackAction,
+    apply_feedback_to_record,
+    build_review_html,
+    build_review_sample,
+    read_feedback_entries_jsonl,
+    read_review_samples_jsonl,
+    write_feedback_entries_jsonl,
+    write_review_samples_jsonl,
+    write_review_spans_csv,
+)
+
+
+def make_review_record() -> ASRConfidenceRecord:
+    span_alternative = ASRAlternative(
+        alternative_id="alt_span_001_rank_001",
+        scope=AlternativeScope.SPAN,
+        rank=1,
+        text="reports chest pain",
+        span_id="span_001",
+        start_word_index=1,
+        end_word_index=3,
+        score=-0.3,
+        confidence=0.61,
+        source="nemo_beam",
+        alignment_method="sequence_nbest_diff",
+    )
+    return ASRConfidenceRecord(
+        record_id="nemo_entropy_primock57_demo_patient",
+        sample_id="primock57:demo:patient",
+        dataset="primock57",
+        split="seed_asr_v0",
+        consultation_id="demo",
+        source_channel=SourceChannel.PATIENT,
+        audio_filepath="data/external/primock57/audio/demo_patient.wav",
+        duration_sec=1.6,
+        reference_textgrid_path="data/external/primock57/transcripts/demo_patient.TextGrid",
+        reference_text_included=False,
+        asr_transcript="patient reports cough now",
+        asr_confidence=0.77,
+        asr_words=[
+            ASRWord(
+                word_index=0,
+                text="patient",
+                start_sec=0.0,
+                end_sec=0.4,
+                confidence=0.93,
+            ),
+            ASRWord(
+                word_index=1,
+                text="reports",
+                start_sec=0.4,
+                end_sec=0.8,
+                confidence=0.77,
+            ),
+            ASRWord(
+                word_index=2,
+                text="cough",
+                start_sec=0.8,
+                end_sec=1.1,
+                confidence=0.42,
+            ),
+            ASRWord(
+                word_index=3,
+                text="now",
+                start_sec=1.1,
+                end_sec=1.3,
+                confidence=0.94,
+            ),
+        ],
+        asr_segments=[
+            ASRSegment(
+                segment_id="seg_001",
+                text="patient reports cough now",
+                start_word_index=0,
+                end_word_index=4,
+                start_sec=0.0,
+                end_sec=1.3,
+                confidence=0.77,
+                confidence_aggregation="mean",
+            )
+        ],
+        uncertain_spans=[
+            UncertainSpan(
+                span_id="span_001",
+                text="reports cough",
+                start_word_index=1,
+                end_word_index=3,
+                start_sec=0.4,
+                end_sec=1.1,
+                mean_confidence=0.595,
+                min_confidence=0.42,
+                alternative_ids=["alt_span_001_rank_001"],
+            )
+        ],
+        asr_alternatives=[span_alternative],
+        model=ASRModelInfo(
+            model_name="fake_nemo",
+            model_path="data/external/asr_models/nemo/fake.nemo",
+            model_class="FakeModel",
+        ),
+        decoding=ASRDecodingConfig(
+            strategy="greedy",
+            batch_size=1,
+            device="cpu",
+        ),
+        confidence=ASRConfidenceConfig(aggregation="mean"),
+        alignment=AlignmentDiagnostics(
+            transcript_word_count=4,
+            word_timestamp_count=4,
+            word_confidence_count=4,
+            asr_word_count=4,
+            paired_word_count=4,
+        ),
+    )
+
+
+def test_build_review_sample_and_export_jsonl_csv(tmp_path) -> None:
+    sample = build_review_sample(make_review_record())
+
+    assert sample.words[2].confidence_level == "red"
+    assert sample.words[2].review_required is True
+    assert sample.uncertain_spans[0].alternatives[0].text == "reports chest pain"
+    assert sample.review_policy["generated_by"] == "T030"
+
+    jsonl_path = tmp_path / "review_samples.jsonl"
+    csv_path = tmp_path / "review_spans.csv"
+    write_review_samples_jsonl([sample], jsonl_path)
+    write_review_spans_csv([sample], csv_path)
+
+    assert read_review_samples_jsonl(jsonl_path)[0].sample_id == "primock57:demo:patient"
+    rows = list(csv.DictReader(csv_path.open("r", encoding="utf-8-sig")))
+    assert rows[0]["span_id"] == "span_001"
+    assert rows[0]["candidate_count"] == "1"
+    assert "reports chest pain" in rows[0]["candidate_texts"]
+
+
+def test_apply_feedback_select_alternative_generates_confirmed_transcript() -> None:
+    record = make_review_record()
+    feedback = DoctorFeedbackEntry(
+        record_id=record.record_id,
+        sample_id=record.sample_id,
+        span_id="span_001",
+        action=ReviewFeedbackAction.SELECT_ALTERNATIVE,
+        selected_alternative_id="alt_span_001_rank_001",
+        original_text="reports cough",
+    )
+
+    confirmed = apply_feedback_to_record(record, [feedback])
+
+    assert confirmed.confirmed_transcript == "patient reports chest pain now"
+    assert confirmed.confirmation_status == ConfirmationStatus.CONFIRMED
+    assert confirmed.applied_spans[0].resolved is True
+    assert confirmed.action_summary == {"select_alternative": 1}
+
+
+def test_apply_feedback_manual_edit_and_reject_policies() -> None:
+    record = make_review_record()
+    manual = DoctorFeedbackEntry(
+        record_id=record.record_id,
+        span_id="span_001",
+        action=ReviewFeedbackAction.MANUAL_EDIT,
+        manual_text="reports dry cough",
+    )
+    manual_confirmed = apply_feedback_to_record(record, [manual])
+    assert manual_confirmed.confirmed_transcript == "patient reports dry cough now"
+    assert manual_confirmed.confirmation_status == ConfirmationStatus.CONFIRMED
+
+    reject = DoctorFeedbackEntry(
+        record_id=record.record_id,
+        span_id="span_001",
+        action=ReviewFeedbackAction.REJECT,
+        note="candidate mismatch",
+    )
+    rejected = apply_feedback_to_record(record, [reject])
+    assert rejected.confirmed_transcript == "patient reports cough now"
+    assert rejected.confirmation_status == ConfirmationStatus.NEEDS_REVIEW
+    assert rejected.unresolved_span_ids == ["span_001"]
+
+
+def test_feedback_jsonl_accepts_entry_and_log_wrapper(tmp_path) -> None:
+    entry = DoctorFeedbackEntry(
+        record_id="record-1",
+        span_id="span_001",
+        action=ReviewFeedbackAction.ACCEPT_ASR,
+    )
+    entry_path = tmp_path / "feedback_entries.jsonl"
+    write_feedback_entries_jsonl([entry], entry_path)
+    assert read_feedback_entries_jsonl(entry_path)[0].action == ReviewFeedbackAction.ACCEPT_ASR
+
+    log_path = tmp_path / "feedback_log.jsonl"
+    log = DoctorFeedbackLog(entries=[entry])
+    log_path.write_text(
+        json.dumps(log.model_dump(mode="json"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    assert read_feedback_entries_jsonl(log_path)[0].span_id == "span_001"
+
+
+def test_build_review_html_contains_interactive_feedback_export() -> None:
+    sample = build_review_sample(make_review_record())
+    html = build_review_html([sample], title="T036 ASR demo", interactive=True)
+
+    assert "T036" in html
+    assert "select_alternative" in html
+    assert "doctor_feedback_log.jsonl" in html
+    assert "reports chest pain" in html

@@ -1,0 +1,153 @@
+\documentclass[UTF8,a4paper,12pt]{ctexart}
+
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{float}
+
+\geometry{left=2.4cm,right=2.4cm,top=2.4cm,bottom=2.4cm}
+\setlist[itemize]{leftmargin=2em,itemsep=0.25em,topsep=0.25em}
+\setlist[enumerate]{leftmargin=2em,itemsep=0.25em,topsep=0.25em}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue}
+\graphicspath{{./}{outputs/reports/}}
+
+\title{\textbf{暑期实践第 1 周周报（一）}\\
+\large 面向临床语音转写噪声的病例信息整理与鲁棒性评估}
+\author{解徐轩}
+\date{2026 年 7 月 2 日}
+
+\begin{document}
+
+\maketitle
+
+\noindent\textbf{项目名称：}面向临床语音转写噪声的病例信息整理与鲁棒性评估\\
+\textbf{学生姓名：}解徐轩\\
+\textbf{周报编号：}第 1 周周报（一）\\
+\textbf{日期：}7.2
+
+\section{本周目标}
+
+本周目标不是直接追求下游模型指标，而是先完成一个可展示、可复现的 ASR 置信度交互审阅最小闭环。具体目标如下：
+
+\begin{itemize}
+  \item 完成 PriMock57 医患音频样本的 ASR 输入 manifest，保留音频路径、数据来源和角色信息，但不在报告或代码仓库中写入真实病例正文。
+  \item 使用项目内 NeMo ASR 模型跑通少量音频，导出 noisy transcript、词级时间戳、词级置信度和片段级置信度等级。
+  \item 将 ASR 置信度映射为绿、黄、红三类风险提示，生成可审阅的 span-level 样本。
+  \item 接入 ASR n-best/top-k 候选，使医生或模拟审阅者点击中低置信度片段时能够看到可选候选。
+  \item 形成一个静态 HTML demo 和一套反馈日志格式，支持选择候选、手动编辑、接受原 ASR、拒绝或标记无法判断，并能回放生成 confirmed transcript。
+\end{itemize}
+
+\section{本周完成内容}
+
+\subsection*{数据}
+
+本周已完成 PriMock57 第一批音频入口构建：生成 5 条 consultation、10 路 doctor/patient 音频 manifest。本周实际 ASR 闭环先采用 \texttt{limit=2} 的小规模样本实跑，即 doctor 和 patient 两路音频，用于验证流程是否能从音频稳定走到审阅界面。所有实验输出只保存 ASR 输出、置信度、候选和统计摘要，不在周报中展示 reference transcript 或任何真实隐私信息。
+
+\subsection*{方法}
+
+本周主线从“文本修复置信度”调整为“ASR 输出层置信度”。实现流程为：
+
+\begin{enumerate}
+  \item 使用项目内 \texttt{stt\_en\_fastconformer\_ctc\_large.nemo} 进行 ASR 转写；
+  \item 用 NeMo entropy confidence 导出词级置信度，当前配置为 \texttt{entropy + tsallis + alpha=0.33 + entropy\_norm=lin + aggregation=mean}；
+  \item 将置信度按阈值分为绿色、黄色、红色，当前阈值为 green $\geq 0.8$，yellow $\geq 0.5$；
+  \item 使用 \texttt{beam\_batch} 生成 sequence-level n-best，再通过词级 diff 将候选映射到 uncertain span；
+  \item 生成审阅 JSONL、span CSV、静态 HTML demo 和反馈日志 schema；
+  \item 回放反馈日志，生成 \texttt{confirmed\_transcript} 记录。
+\end{enumerate}
+
+\subsection*{结果}
+
+本周已形成可运行闭环：\textbf{音频数据 $\rightarrow$ ASR $\rightarrow$ noisy transcript + 置信度 $\rightarrow$ n-best 候选 $\rightarrow$ 绿/黄/红审阅样本 $\rightarrow$ 医生交互界面 $\rightarrow$ confirmed transcript 回放}。
+
+在 \texttt{limit=2} 实跑中，ASR 输出 1145 个词，其中 1031 个为绿色、114 个为黄色、0 个为红色，平均词级置信度为 0.884。审阅样本中形成 74 个黄色待审阅 span，其中 2 个 span 已带有 ASR 候选。n-best 解码共产生 10 个 sequence alternatives，并映射出 2 个 span alternatives。HTML demo 支持 5 类反馈动作：接受 ASR、选择候选、手动编辑、拒绝、无法判断。
+
+\subsection*{展示材料}
+
+本周形成了可展示的图、表、结构化输出和 demo 文件。核心展示图见图 \ref{fig:week1-summary}。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{week1_asr_confidence_review_summary.png}
+  \caption{第 1 周 ASR 置信度审阅 demo 摘要图。该图由脚本根据 run summary 自动生成，不包含原始病例正文。}
+  \label{fig:week1-summary}
+\end{figure}
+
+\section{本周可展示成果}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{p{3.2cm}X}
+\toprule
+\textbf{成果类型} & \textbf{位置或说明} \\
+\midrule
+周报图 & \texttt{outputs/reports/week1\_asr\_confidence\_review\_summary.png} \\
+图生成脚本 & \texttt{scripts/generate\_weekly\_report\_assets.py} \\
+ASR confidence JSONL & \texttt{outputs/primock57/t028\_nemo\_asr\_confidence/primock57\_asr\_confidence\_limit2.jsonl} \\
+n-best 候选 JSONL & \texttt{outputs/primock57/t037\_nemo\_asr\_nbest/primock57\_sequence\_nbest\_limit2.jsonl} \\
+带候选 ASR JSONL & \texttt{outputs/primock57/t029\_asr\_nbest\_candidates/primock57\_asr\_confidence\_with\_candidates\_limit2.jsonl} \\
+审阅样本包 & \texttt{outputs/primock57/t030\_review\_samples/primock57\_asr\_review\_samples.jsonl} 与 \texttt{primock57\_asr\_review\_spans.csv} \\
+交互 demo & \texttt{outputs/primock57/t036\_doctor\_review\_demo/doctor\_review\_demo.html} \\
+反馈回放脚本 & \texttt{scripts/apply\_asr\_review\_feedback.py}，可生成 \texttt{confirmed\_transcript} \\
+\bottomrule
+\end{tabularx}
+\caption{本周可展示成果与文件位置}
+\end{table}
+
+结构化输出示例字段如下。该示例只展示字段结构，不展示真实转写正文：
+
+\begin{verbatim}
+{
+  "schema_version": "asr_review_sample/v1",
+  "sample_id": "primock57:...:patient",
+  "asr_transcript": "[redacted in report]",
+  "words": [
+    {"text": "...", "start_sec": 1.23, "end_sec": 1.56,
+     "confidence": 0.91, "confidence_level": "green"}
+  ],
+  "uncertain_spans": [
+    {"span_id": "span_001", "confidence_level": "yellow",
+     "alternatives": [{"rank": 1, "text": "..."}]}
+  ],
+  "review_policy": {
+    "actions": ["accept_asr", "select_alternative",
+                "manual_edit", "reject", "unable_to_judge"]
+  }
+}
+\end{verbatim}
+
+\section{当前结果与初步结论}
+
+目前结果说明，本课题的第一阶段主干流程已经从概念设计变成可运行 demo。ASR 不再只输出一段 noisy transcript，而是能同步给出词级置信度、时间戳、颜色等级和候选信息；审阅界面也不只是静态展示文本，而是能够记录医生或模拟审阅者的选择并回放为 confirmed transcript。
+
+从统计结果看，当前两路样本中大多数词被分到绿色，约 10.0\% 的词被分到黄色，没有红色词。这说明修正后的线性 entropy 归一化避免了此前“置信度整体贴近 0、界面全红”的问题，已经更适合作为第一版审阅优先级提示。不过，这还不能说明阈值已经可靠，因为尚未与 reference transcript 对齐计算分桶错误率和校准误差。
+
+n-best 候选已经接入，但覆盖仍然有限：10 个 sequence-level 候选最终只映射出 2 个带候选 span。这说明第一版已经验证了“ASR 候选进入医生审阅界面”的技术可行性，但后续需要进一步评估候选是否真正覆盖医学术语、药名、否定词等关键错误。如果 sequence-level beam 的候选不足，后续可以考虑接入医学词表、上下文 bias 或文本 repair 作为辅助候选，但近期主线仍应以 ASR 原生置信度和候选为主。
+
+\section{遇到的问题与当前判断}
+
+\begin{itemize}
+  \item \textbf{置信度归一化问题：}初版 \texttt{entropy\_norm=exp} 会导致当前样本词级置信度整体过低，使界面几乎全红。当前已改为 \texttt{entropy\_norm=lin}，视觉分布更合理。下一步需要用 reference transcript 正式评估阈值，而不是只凭颜色分布判断。
+  \item \textbf{候选粒度问题：}当前 n-best 是 sequence-level beam，不是严格词级 top-k。span 候选通过 diff 映射得到，因此候选覆盖率有限。当前判断是：该方案适合 V0 demo，但 T031 必须量化 top-k/span candidate 覆盖率。
+  \item \textbf{交互 demo 的工程边界：}HTML demo 是静态单文件，没有后端保存、审阅者身份管理或权限控制。当前阶段它足以展示交互流程；真实医生评测前需要补充日志保存、审阅成本统计和研究输出标识。
+  \item \textbf{下游评估尚未开始：}本周完成的是 ASR 输出层和审阅层闭环，还没有比较 raw ASR、confirmed transcript 和 reference 在症状抽取或病例摘要上的差异。下周应进入评估层。
+\end{itemize}
+
+\section{下周计划}
+
+下周目标是把本周 demo 推进为可解释的初步评估结果，具体交付如下：
+
+\begin{enumerate}
+  \item 完成 T031：用 reference transcript 对当前 ASR 输出进行对齐，统计绿/黄/红分桶错误率、置信度校准指标和 top-k 候选覆盖率。
+  \item 完成 T032：整理第一批 ASR 输出层最小闭环实验记录，明确每一步输入、输出、脚本命令、配置、失败案例和可复现路径。
+  \item 扩展 2--5 条样本的模拟审阅反馈，生成 \texttt{confirmed\_transcript}，并统计每条样本的待审阅 span 数、候选选择数、手动编辑数和 unresolved span 数。
+  \item 选择一个下游病例信息整理任务作为第一版评估入口，优先考虑症状/医学实体抽取或结构化摘要信息保持，对比 raw ASR、confirmed transcript 和 reference 三类输入。
+  \item 在最终展示材料上，将本周 HTML demo、下周评估表和 1--2 个脱敏失败案例组合成一个完整故事：ASR 哪里不确定、医生如何确认、确认后是否改善下游整理质量。
+\end{enumerate}
+
+\end{document}
