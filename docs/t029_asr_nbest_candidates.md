@@ -1,6 +1,6 @@
 # T029 ASR n-best/top-k 候选抽取策略
 
-更新时间：2026-07-02
+更新时间：2026-07-07
 
 T029 已新增项目侧候选抽取入口：
 
@@ -17,6 +17,10 @@ T029 已新增项目侧候选抽取入口：
 3. 生成 `scope="span"` 的候选，并把候选 ID 回写到 `uncertain_spans[].alternative_ids`。
 
 本任务只处理 ASR 输出层候选，不读取或内联 reference transcript 正文，也不把候选内容视作临床建议。
+
+2026-07-07 起，若采用“医学实体优先审阅”逻辑，建议先运行 T038，把
+`uncertain_spans` 限定为 LLM 识别出的医学实体非 green 片段，再运行 T029。
+这样 T029 的 span candidates 会自然只生成给医学实体，而不是所有低/中置信度普通词。
 
 ## V0 策略
 
@@ -82,6 +86,15 @@ NeMo `transcribe_utils.write_transcription()` 在 `extract_nbest=True` 且 beam 
   --input-jsonl outputs/primock57/t028_nemo_asr_confidence/primock57_asr_confidence.jsonl \
   --nbest-jsonl outputs/primock57/t029_asr_nbest_candidates/primock57_sequence_nbest.jsonl \
   --output-jsonl outputs/primock57/t029_asr_nbest_candidates/primock57_asr_confidence_with_candidates.jsonl
+```
+
+若采用 T038 医学实体 gating：
+
+```bash
+/home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/extract_asr_nbest_candidates.py \
+  --input-jsonl outputs/primock57/t038_medical_entity_review/primock57_asr_confidence_medical_entities.jsonl \
+  --nbest-jsonl outputs/primock57/t037_nemo_asr_nbest/primock57_sequence_nbest_limit2.jsonl \
+  --output-jsonl outputs/primock57/t029_asr_nbest_candidates/primock57_asr_confidence_medical_entity_candidates.jsonl
 ```
 
 若输入 record 已经包含 `scope="sequence"` 候选，也可以省略 `--nbest-jsonl`：

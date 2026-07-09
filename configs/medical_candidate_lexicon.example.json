@@ -1,0 +1,107 @@
+{
+  "schema_version": "medical_candidate_lexicon/v1",
+  "description": "轻量医学实体辅助候选词表示例。仅用于 ASR 原生 span 候选缺失时的研究兜底，不代表标准医学术语库。",
+  "terms": {
+    "_global": [
+      "abdominal pain",
+      "asthma",
+      "back ache",
+      "back pain",
+      "blood",
+      "blood in stool",
+      "chest pain",
+      "cough",
+      "diarrhea",
+      "diarrhoea",
+      "fever",
+      "feverish",
+      "feeling sick",
+      "feeling weak",
+      "fluid",
+      "fluids",
+      "inhaler",
+      "inhalers",
+      "loose stool",
+      "loose stools",
+      "medication",
+      "medications",
+      "pain",
+      "shaky",
+      "temperature",
+      "tummy",
+      "tummy pain",
+      "vomiting",
+      "weak"
+    ],
+    "symptom": [
+      "abdominal pain",
+      "blood",
+      "blood in stool",
+      "chest pain",
+      "cough",
+      "diarrhea",
+      "diarrhoea",
+      "fever",
+      "feverish",
+      "feeling sick",
+      "feeling weak",
+      "loose stools",
+      "pain",
+      "shaky",
+      "temperature",
+      "tummy pain",
+      "vomiting",
+      "weak"
+    ],
+    "medication": [
+      "inhaler",
+      "inhalers",
+      "medication",
+      "medications",
+      "medicine",
+      "medicines",
+      "paracetamol",
+      "salbutamol"
+    ],
+    "drug": [
+      "inhaler",
+      "inhalers",
+      "medication",
+      "medications",
+      "medicine",
+      "medicines",
+      "paracetamol",
+      "salbutamol"
+    ],
+    "device": [
+      "inhaler",
+      "inhalers"
+    ],
+    "anatomy": [
+      "abdomen",
+      "chest",
+      "stomach",
+      "tummy"
+    ],
+    "clinical_attribute": [
+      "blood",
+      "fluid",
+      "fluids",
+      "loose",
+      "symptom",
+      "symptoms",
+      "temperature"
+    ],
+    "lab_test": [
+      "blood test",
+      "stool test",
+      "urine test"
+    ],
+    "imaging": [
+      "CT",
+      "MRI",
+      "ultrasound",
+      "x-ray"
+    ]
+  }
+}

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import traceback
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,10 +28,21 @@ from clinical_asr_robustness.asr_confidence import (
     write_asr_confidence_jsonl,
 )
 from clinical_asr_robustness.asr_nbest_candidates import (
+    DEFAULT_API_KEY_ENV,
+    DEFAULT_AUX_MIN_SIMILARITY,
+    DEFAULT_LLM_WORD_CANDIDATES,
+    DEFAULT_LLM_WORD_CONTEXT_WINDOW,
+    DEFAULT_LLM_WORD_LEXICON_TERMS,
     DEFAULT_NBEST_SOURCE,
+    LLM_WORD_AUX_SOURCE,
+    MEDICAL_LEXICON_AUX_SOURCE,
     SEQUENCE_ALIGNMENT_METHOD,
     SPAN_ALIGNMENT_METHOD,
     attach_nbest_candidates_to_record,
+    build_llm_word_candidate_prompt_records,
+    generate_llm_word_candidate_content_with_api,
+    llm_prompt_to_json_record,
+    load_medical_candidate_lexicon,
     load_nbest_jsonl,
     nbest_items_for_record,
 )
@@ -42,6 +54,10 @@ DEFAULT_INPUT_JSONL = (
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs/primock57/t029_asr_nbest_candidates"
 DEFAULT_OUTPUT_JSONL = DEFAULT_OUTPUT_DIR / "primock57_asr_confidence_with_candidates.jsonl"
 DEFAULT_RUN_CONFIG = DEFAULT_OUTPUT_DIR / "t029_asr_nbest_candidates_run.json"
+DEFAULT_AUX_LEXICON_JSON = PROJECT_ROOT / "configs/medical_candidate_lexicon.example.json"
+DEFAULT_LLM_CANDIDATE_PROMPTS_JSONL = (
+    DEFAULT_OUTPUT_DIR / "primock57_llm_word_candidate_prompts.jsonl"
+)
 
 
 def path_for_record(path: Path, project_root: Path = PROJECT_ROOT) -> str:
@@ -60,6 +76,14 @@ def resolve_project_path(path_value: str | Path) -> Path:
     if path.is_absolute():
         return path
     return PROJECT_ROOT / path
+
+
+def write_llm_candidate_prompts_jsonl(records: list[dict[str, Any]], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as file:
+        for record in records:
+            file.write(json.dumps(record, ensure_ascii=False))
+            file.write("\n")
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,6 +108,83 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="默认跳过与原 uncertain span 文本完全相同的 span 候选。",
     )
+    parser.add_argument(
+        "--disable-aux-medical-candidates",
+        action="store_false",
+        dest="enable_auxiliary_medical_candidates",
+        help=(
+            "Disable T039 medical lexicon/fuzzy fallback candidates. "
+            "Fallback candidates are enabled by default and are only added "
+            "when a medical entity span has no ASR-native span candidate."
+        ),
+    )
+    parser.set_defaults(enable_auxiliary_medical_candidates=True)
+    parser.add_argument(
+        "--aux-medical-lexicon-json",
+        type=Path,
+        default=DEFAULT_AUX_LEXICON_JSON,
+        help="Optional JSON lexicon for T039 auxiliary medical candidates.",
+    )
+    parser.add_argument(
+        "--max-auxiliary-span-alternatives",
+        type=int,
+        default=None,
+        help="Max T039 auxiliary candidates per span; defaults to --max-span-alternatives.",
+    )
+    parser.add_argument(
+        "--aux-min-similarity",
+        type=float,
+        default=DEFAULT_AUX_MIN_SIMILARITY,
+        help="Minimum fuzzy similarity for T039 auxiliary candidates.",
+    )
+    parser.add_argument(
+        "--llm-candidate-prompts-jsonl",
+        type=Path,
+        default=DEFAULT_LLM_CANDIDATE_PROMPTS_JSONL,
+        help="Prompt-ready JSONL for T044 yellow/red word LLM candidate generation.",
+    )
+    parser.add_argument(
+        "--run-llm-candidates",
+        action="store_true",
+        help="Actually call the OpenAI-compatible LLM API for T044 word candidates.",
+    )
+    parser.add_argument(
+        "--max-llm-word-candidates",
+        type=int,
+        default=DEFAULT_LLM_WORD_CANDIDATES,
+        help="Max T044 LLM candidates per yellow/red target word.",
+    )
+    parser.add_argument(
+        "--llm-word-context-window",
+        type=int,
+        default=DEFAULT_LLM_WORD_CONTEXT_WINDOW,
+        help="Number of words kept on each side of a target word for T044 prompts.",
+    )
+    parser.add_argument(
+        "--max-llm-lexicon-terms",
+        type=int,
+        default=DEFAULT_LLM_WORD_LEXICON_TERMS,
+        help="Max medical lexicon terms included in each T044 prompt.",
+    )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+        help="Project .env for LLM candidate API config; ignored unless --run-llm-candidates.",
+    )
+    parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
+    parser.add_argument(
+        "--llm-base-url",
+        default=None,
+        help="OpenAI-compatible base URL for T044 candidates; defaults to .env/env.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=None,
+        help="LLM model for T044 candidates; defaults to .env/env.",
+    )
+    parser.add_argument("--llm-timeout-sec", type=float, default=60.0)
+    parser.add_argument("--llm-max-tokens", type=int, default=500)
     return parser.parse_args()
 
 
@@ -93,13 +194,57 @@ def run_extraction(args: argparse.Namespace) -> tuple[list[ASRConfidenceRecord],
     input_jsonl = resolve_project_path(args.input_jsonl)
     output_jsonl = resolve_project_path(args.output_jsonl)
     nbest_jsonl = resolve_project_path(args.nbest_jsonl) if args.nbest_jsonl else None
-
+    llm_candidate_prompts_jsonl = (
+        resolve_project_path(args.llm_candidate_prompts_jsonl)
+        if args.llm_candidate_prompts_jsonl
+        else None
+    )
     records = read_asr_confidence_jsonl(input_jsonl)
     nbest_by_key = (
         load_nbest_jsonl(nbest_jsonl, default_source=args.default_source)
         if nbest_jsonl is not None
         else {}
     )
+    aux_lexicon_json = (
+        resolve_project_path(args.aux_medical_lexicon_json)
+        if args.aux_medical_lexicon_json is not None
+        else None
+    )
+    aux_medical_lexicon = None
+    aux_lexicon_loaded = False
+    if aux_lexicon_json is not None and aux_lexicon_json.exists():
+        aux_medical_lexicon = load_medical_candidate_lexicon(aux_lexicon_json)
+        aux_lexicon_loaded = True
+
+    llm_prompt_records = [
+        llm_prompt_to_json_record(prompt)
+        for record in records
+        for prompt in build_llm_word_candidate_prompt_records(
+            record,
+            medical_candidate_lexicon=aux_medical_lexicon,
+            context_window_words=args.llm_word_context_window,
+            max_lexicon_terms=args.max_llm_lexicon_terms,
+        )
+    ]
+    if llm_candidate_prompts_jsonl is not None:
+        write_llm_candidate_prompts_jsonl(llm_prompt_records, llm_candidate_prompts_jsonl)
+
+    llm_word_candidate_generator = None
+    if args.run_llm_candidates:
+        llm_env_file = resolve_project_path(args.env_file) if args.env_file else None
+
+        def llm_word_candidate_generator(
+            messages: list[dict[str, str]],
+        ) -> tuple[str, dict[str, Any]]:
+            return generate_llm_word_candidate_content_with_api(
+                messages,
+                api_key_env=args.api_key_env,
+                base_url=args.llm_base_url,
+                model_name=args.llm_model,
+                dotenv_path=llm_env_file,
+                timeout_sec=args.llm_timeout_sec,
+                max_tokens=args.llm_max_tokens,
+            )
 
     output_records: list[ASRConfidenceRecord] = []
     records_with_nbest_input = 0
@@ -115,6 +260,17 @@ def run_extraction(args: argparse.Namespace) -> tuple[list[ASRConfidenceRecord],
                 max_span_alternatives=args.max_span_alternatives,
                 default_source=args.default_source,
                 include_unchanged_span_candidates=args.include_unchanged_span_candidates,
+                enable_auxiliary_medical_candidates=(
+                    args.enable_auxiliary_medical_candidates
+                ),
+                medical_candidate_lexicon=aux_medical_lexicon,
+                max_auxiliary_span_alternatives=args.max_auxiliary_span_alternatives,
+                aux_min_similarity=args.aux_min_similarity,
+                enable_llm_word_candidates=args.run_llm_candidates,
+                llm_word_candidate_generator=llm_word_candidate_generator,
+                max_llm_word_candidates=args.max_llm_word_candidates,
+                llm_word_context_window=args.llm_word_context_window,
+                max_llm_lexicon_terms=args.max_llm_lexicon_terms,
             )
         )
 
@@ -125,6 +281,10 @@ def run_extraction(args: argparse.Namespace) -> tuple[list[ASRConfidenceRecord],
         nbest_jsonl=nbest_jsonl,
         records=output_records,
         records_with_nbest_input=records_with_nbest_input,
+        aux_lexicon_json=aux_lexicon_json,
+        aux_lexicon_loaded=aux_lexicon_loaded,
+        llm_candidate_prompts_jsonl=llm_candidate_prompts_jsonl,
+        llm_prompt_record_count=len(llm_prompt_records),
         args=args,
     )
     return output_records, run_summary
@@ -137,6 +297,10 @@ def build_run_summary(
     nbest_jsonl: Path | None,
     records: list[ASRConfidenceRecord],
     records_with_nbest_input: int,
+    aux_lexicon_json: Path | None,
+    aux_lexicon_loaded: bool,
+    llm_candidate_prompts_jsonl: Path | None,
+    llm_prompt_record_count: int,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     """构造 T029 运行摘要。"""
@@ -147,12 +311,35 @@ def build_run_summary(
         for alternative in record.asr_alternatives
         if alternative.scope == AlternativeScope.SEQUENCE
     )
-    span_alternative_count = sum(
-        1
+    span_alternatives = [
+        alternative
         for record in records
         for alternative in record.asr_alternatives
         if alternative.scope == AlternativeScope.SPAN
+    ]
+    span_alternative_count = len(span_alternatives)
+    span_alternative_count_by_source = Counter(
+        alternative.source for alternative in span_alternatives
     )
+    word_alternatives = [
+        alternative
+        for record in records
+        for alternative in record.asr_alternatives
+        if alternative.scope == AlternativeScope.WORD
+    ]
+    word_alternative_count = len(word_alternatives)
+    word_alternative_count_by_source = Counter(
+        alternative.source for alternative in word_alternatives
+    )
+    spans_with_alternatives_by_source: Counter[str] = Counter()
+    for record in records:
+        for span in record.uncertain_spans:
+            span_sources = {
+                alternative.source
+                for alternative in record.alternatives_for_span(span.span_id)
+            }
+            for source in span_sources:
+                spans_with_alternatives_by_source[source] += 1
     spans_with_alternatives = sum(
         1
         for record in records
@@ -171,6 +358,10 @@ def build_run_summary(
         any(alternative.scope == AlternativeScope.SPAN for alternative in record.asr_alternatives)
         for record in records
     )
+    records_with_word_alternatives = sum(
+        any(alternative.scope == AlternativeScope.WORD for alternative in record.asr_alternatives)
+        for record in records
+    )
 
     return {
         "task_id": "T029",
@@ -185,6 +376,11 @@ def build_run_summary(
         },
         "outputs": {
             "asr_confidence_with_candidates_jsonl": path_for_record(output_jsonl),
+            "llm_word_candidate_prompts_jsonl": (
+                path_for_record(llm_candidate_prompts_jsonl)
+                if llm_candidate_prompts_jsonl
+                else None
+            ),
         },
         "parameters": {
             "default_source": args.default_source,
@@ -193,14 +389,39 @@ def build_run_summary(
             "include_unchanged_span_candidates": args.include_unchanged_span_candidates,
             "sequence_alignment_method": SEQUENCE_ALIGNMENT_METHOD,
             "span_alignment_method": SPAN_ALIGNMENT_METHOD,
+            "enable_auxiliary_medical_candidates": (
+                args.enable_auxiliary_medical_candidates
+            ),
+            "auxiliary_candidate_source": MEDICAL_LEXICON_AUX_SOURCE,
+            "aux_medical_lexicon_json": (
+                path_for_record(aux_lexicon_json) if aux_lexicon_json else None
+            ),
+            "aux_medical_lexicon_loaded": aux_lexicon_loaded,
+            "max_auxiliary_span_alternatives": args.max_auxiliary_span_alternatives,
+            "aux_min_similarity": args.aux_min_similarity,
+            "llm_word_candidate_source": LLM_WORD_AUX_SOURCE,
+            "run_llm_candidates": args.run_llm_candidates,
+            "max_llm_word_candidates": args.max_llm_word_candidates,
+            "llm_word_context_window": args.llm_word_context_window,
+            "max_llm_lexicon_terms": args.max_llm_lexicon_terms,
+            "llm_timeout_sec": args.llm_timeout_sec,
+            "llm_max_tokens": args.llm_max_tokens,
         },
         "validation": {
             "sequence_alternatives": sequence_alternative_count,
             "span_alternatives": span_alternative_count,
+            "span_alternatives_by_source": dict(span_alternative_count_by_source),
+            "word_alternatives": word_alternative_count,
+            "word_alternatives_by_source": dict(word_alternative_count_by_source),
+            "llm_word_candidate_prompt_records": llm_prompt_record_count,
             "total_uncertain_spans": total_uncertain_spans,
             "spans_with_alternatives": spans_with_alternatives,
+            "spans_with_alternatives_by_source": dict(
+                spans_with_alternatives_by_source
+            ),
             "records_with_sequence_alternatives": records_with_sequence_alternatives,
             "records_with_span_alternatives": records_with_span_alternatives,
+            "records_with_word_alternatives": records_with_word_alternatives,
             "no_inline_reference_text": all(
                 not record.reference_text_included for record in records
             ),

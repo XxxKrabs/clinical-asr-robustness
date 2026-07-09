@@ -175,6 +175,40 @@ def test_apply_feedback_select_alternative_generates_confirmed_transcript() -> N
     assert confirmed.action_summary == {"select_alternative": 1}
 
 
+
+def test_apply_feedback_select_word_alternative_replaces_only_target_word() -> None:
+    payload = make_review_record().model_dump(mode="json")
+    payload["asr_alternatives"].append(
+        {
+            "alternative_id": "alt_word_001_rank_001",
+            "scope": "word",
+            "rank": 2,
+            "text": "chest pain",
+            "span_id": "span_001",
+            "start_word_index": 2,
+            "end_word_index": 3,
+            "source": "llm_word_candidate",
+            "alignment_method": "llm_target_word_context_lexicon",
+            "metadata": {"generated_by": "T044", "target_word_text": "cough"},
+        }
+    )
+    payload["uncertain_spans"][0]["alternative_ids"].append("alt_word_001_rank_001")
+    record = ASRConfidenceRecord.model_validate(payload)
+    feedback = DoctorFeedbackEntry(
+        record_id=record.record_id,
+        sample_id=record.sample_id,
+        span_id="span_001",
+        action=ReviewFeedbackAction.SELECT_ALTERNATIVE,
+        selected_alternative_id="alt_word_001_rank_001",
+        original_text="reports cough",
+    )
+
+    confirmed = apply_feedback_to_record(record, [feedback])
+
+    assert confirmed.confirmed_transcript == "patient reports chest pain now"
+    assert confirmed.applied_spans[0].confirmed_text == "reports chest pain"
+    assert confirmed.applied_spans[0].selected_alternative_text == "chest pain"
+    assert confirmed.applied_spans[0].metadata["alternative_scope"] == "word"
 def test_apply_feedback_manual_edit_and_reject_policies() -> None:
     record = make_review_record()
     manual = DoctorFeedbackEntry(
@@ -216,6 +250,22 @@ def test_feedback_jsonl_accepts_entry_and_log_wrapper(tmp_path) -> None:
         encoding="utf-8",
     )
     assert read_feedback_entries_jsonl(log_path)[0].span_id == "span_001"
+
+
+def test_feedback_jsonl_accepts_utf8_bom(tmp_path) -> None:
+    entry = DoctorFeedbackEntry(
+        record_id="record-1",
+        span_id="span_001",
+        action=ReviewFeedbackAction.ACCEPT_ASR,
+    )
+    payload = json.dumps(entry.model_dump(mode="json"), ensure_ascii=False) + "\n"
+    feedback_path = tmp_path / "feedback_entries_bom.jsonl"
+    feedback_path.write_text(payload, encoding="utf-8-sig")
+
+    entries = read_feedback_entries_jsonl(feedback_path)
+
+    assert entries[0].record_id == "record-1"
+    assert entries[0].action == ReviewFeedbackAction.ACCEPT_ASR
 
 
 def test_build_review_html_contains_interactive_feedback_export() -> None:

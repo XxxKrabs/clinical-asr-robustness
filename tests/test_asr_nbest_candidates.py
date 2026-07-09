@@ -15,9 +15,13 @@ from clinical_asr_robustness.asr_confidence import (
     UncertainSpan,
 )
 from clinical_asr_robustness.asr_nbest_candidates import (
+    LLM_WORD_AUX_SOURCE,
+    MEDICAL_LEXICON_ALIGNMENT_METHOD,
+    MEDICAL_LEXICON_AUX_SOURCE,
     SPAN_ALIGNMENT_METHOD,
     align_sequence_candidate_to_span,
     attach_nbest_candidates_to_record,
+    build_llm_word_candidate_prompt_records,
     load_nbest_jsonl,
     nbest_items_for_record,
 )
@@ -178,6 +182,156 @@ def test_attach_nbest_candidates_adds_sequence_and_span_alternatives() -> None:
         alternative.alternative_id for alternative in span_alternatives
     ]
     assert updated.metadata["t029_nbest_candidate_extraction"]["span_alternatives_added"] == 2
+
+
+def test_auxiliary_medical_candidates_fill_medical_span_without_asr_candidate() -> None:
+    payload = make_base_record().model_dump(mode="json")
+    payload["asr_transcript"] = "patient reports diarrheea now"
+    payload["asr_words"][2]["text"] = "diarrheea"
+    payload["asr_words"][2]["metadata"] = {
+        "medical_entity_review": {
+            "is_medical_entity": True,
+            "entity_ids": ["ent_001"],
+        }
+    }
+    payload["asr_segments"][0]["text"] = "patient reports diarrheea now"
+    payload["uncertain_spans"] = [
+        {
+            "span_id": "medspan_001",
+            "text": "diarrheea",
+            "start_word_index": 2,
+            "end_word_index": 3,
+            "start_sec": 0.8,
+            "end_sec": 1.1,
+            "mean_confidence": 0.42,
+            "min_confidence": 0.42,
+            "trigger_reason": "medical_entity_low_or_medium_confidence",
+            "metadata": {
+                "medical_entity_ids": ["ent_001"],
+                "medical_entities": [
+                    {"entity_id": "ent_001", "text": "diarrheea", "entity_type": "symptom"}
+                ],
+            },
+        }
+    ]
+    record = ASRConfidenceRecord.model_validate(payload)
+
+    updated = attach_nbest_candidates_to_record(
+        record,
+        [{"rank": 1, "text": "patient reports diarrheea now", "score": -0.1}],
+        enable_auxiliary_medical_candidates=True,
+        medical_candidate_lexicon={"symptom": ["diarrhea", "vomiting"]},
+        max_auxiliary_span_alternatives=1,
+        aux_min_similarity=0.5,
+    )
+
+    span_alternatives = [
+        alternative
+        for alternative in updated.asr_alternatives
+        if alternative.scope == AlternativeScope.SPAN
+    ]
+    assert [alternative.text for alternative in span_alternatives] == ["diarrhea"]
+    assert span_alternatives[0].source == MEDICAL_LEXICON_AUX_SOURCE
+    assert span_alternatives[0].alignment_method == MEDICAL_LEXICON_ALIGNMENT_METHOD
+    assert span_alternatives[0].metadata["generated_by"] == "T039"
+    assert span_alternatives[0].metadata["reference_used"] is False
+    assert updated.uncertain_spans[0].alternative_ids == [
+        span_alternatives[0].alternative_id
+    ]
+    assert (
+        updated.metadata["t039_auxiliary_candidate_generation"][
+            "auxiliary_span_alternatives_added"
+        ]
+        == 1
+    )
+
+
+
+def test_llm_word_candidates_target_yellow_red_words_with_context_and_lexicon() -> None:
+    payload = make_base_record().model_dump(mode="json")
+    payload["uncertain_spans"] = [
+        {
+            "span_id": "span_word_001",
+            "text": "cough now",
+            "start_word_index": 2,
+            "end_word_index": 4,
+            "start_sec": 0.8,
+            "end_sec": 1.3,
+            "mean_confidence": 0.68,
+            "min_confidence": 0.42,
+            "metadata": {
+                "medical_entities": [
+                    {"entity_id": "ent_001", "text": "cough", "entity_type": "symptom"}
+                ]
+            },
+        }
+    ]
+    record = ASRConfidenceRecord.model_validate(payload)
+    lexicon = {"symptom": ["coughing", "chest pain", "fever"]}
+
+    prompts = build_llm_word_candidate_prompt_records(
+        record,
+        medical_candidate_lexicon=lexicon,
+        context_window_words=2,
+        max_lexicon_terms=5,
+    )
+
+    assert len(prompts) == 1
+    assert prompts[0].target_word_text == "cough"
+    assert prompts[0].target_confidence_level == "red"
+    assert prompts[0].context["window_text"] == "patient reports cough now"
+    assert "coughing" in prompts[0].medical_lexicon_terms
+
+    calls: list[list[dict[str, str]]] = []
+
+    def fake_generator(messages: list[dict[str, str]]) -> tuple[str, dict[str, str]]:
+        calls.append(messages)
+        return '{"candidates": ["coughing", "chest pain", "cough"]}', {
+            "model_name": "fake-llm"
+        }
+
+    updated = attach_nbest_candidates_to_record(
+        record,
+        [],
+        enable_llm_word_candidates=True,
+        llm_word_candidate_generator=fake_generator,
+        medical_candidate_lexicon=lexicon,
+        max_llm_word_candidates=3,
+        llm_word_context_window=2,
+        max_llm_lexicon_terms=5,
+    )
+
+    word_alternatives = [
+        alternative
+        for alternative in updated.asr_alternatives
+        if alternative.scope == AlternativeScope.WORD
+    ]
+    assert len(calls) == 1
+    assert [alternative.text for alternative in word_alternatives] == [
+        "coughing",
+        "chest pain",
+    ]
+    assert {alternative.source for alternative in word_alternatives} == {LLM_WORD_AUX_SOURCE}
+    assert word_alternatives[0].span_id == "span_word_001"
+    assert word_alternatives[0].start_word_index == 2
+    assert word_alternatives[0].end_word_index == 3
+    assert word_alternatives[0].metadata["generated_by"] == "T044"
+    assert word_alternatives[0].metadata["target_word_text"] == "cough"
+    assert updated.uncertain_spans[0].alternative_ids == [
+        alternative.alternative_id for alternative in word_alternatives
+    ]
+    assert (
+        updated.metadata["t044_llm_word_candidate_generation"][
+            "eligible_yellow_red_words"
+        ]
+        == 1
+    )
+    assert (
+        updated.metadata["t044_llm_word_candidate_generation"][
+            "word_alternatives_added"
+        ]
+        == 2
+    )
 
 
 def test_load_nbest_jsonl_supports_record_level_and_item_level_formats(tmp_path) -> None:

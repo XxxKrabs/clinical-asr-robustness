@@ -198,6 +198,9 @@ def build_asr_confidence_record(
     segment_max_words: int = 40,
     segment_max_gap_sec: float = 1.5,
     segment_confidence_aggregation: str = "mean",
+    word_confidences_override: Iterable[Any] | None = None,
+    word_confidence_source: str | None = None,
+    word_confidence_metadata_by_index: list[dict[str, Any]] | None = None,
 ) -> ASRConfidenceRecord:
     """将一条 NeMo Hypothesis 转成项目侧 `ASRConfidenceRecord`。"""
 
@@ -211,6 +214,9 @@ def build_asr_confidence_record(
         transcript=transcript,
         hypothesis=hypothesis,
         thresholds=thresholds,
+        word_confidences_override=word_confidences_override,
+        word_confidence_source=word_confidence_source,
+        word_confidence_metadata_by_index=word_confidence_metadata_by_index,
     )
     asr_confidence = aggregate_confidences(
         (word.confidence for word in asr_words),
@@ -243,6 +249,8 @@ def build_asr_confidence_record(
             "frame_confidence_count": len(_sequence_to_list(
                 getattr(hypothesis, "frame_confidence", None)
             )),
+            "project_word_confidence_source": word_confidence_source
+            or "nemo.word_confidence",
         },
         "segment_derivation": {
             "source": "asr_words",
@@ -293,6 +301,9 @@ def build_words_and_alignment(
     transcript: str,
     hypothesis: Any,
     thresholds: ConfidenceThresholds | None = None,
+    word_confidences_override: Iterable[Any] | None = None,
+    word_confidence_source: str | None = None,
+    word_confidence_metadata_by_index: list[dict[str, Any]] | None = None,
 ) -> tuple[list[ASRWord], AlignmentDiagnostics]:
     """按 T027 规则以 transcript words 为锚点对齐 timestamp/confidence。"""
 
@@ -300,7 +311,15 @@ def build_words_and_alignment(
     words = transcript.split()
     char_offsets = _word_char_offsets(transcript, words)
     word_timestamps = _timestamp_items(hypothesis, "word")
-    word_confidences = _sequence_to_list(getattr(hypothesis, "word_confidence", None))
+    if word_confidences_override is None:
+        word_confidences = _sequence_to_list(getattr(hypothesis, "word_confidence", None))
+        active_confidence_source = word_confidence_source or "nemo.word_confidence"
+    else:
+        word_confidences = _sequence_to_list(list(word_confidences_override))
+        active_confidence_source = (
+            word_confidence_source or "ctc_frame_distribution.word_confidence"
+        )
+    metadata_by_index = word_confidence_metadata_by_index or []
 
     asr_words: list[ASRWord] = []
     missing_timestamp_indices: list[int] = []
@@ -335,11 +354,19 @@ def build_words_and_alignment(
                 confidence_level=confidence_level_for_score(confidence, active_thresholds),
                 timestamp_source="nemo.timestamp.word" if timestamp is not None else None,
                 confidence_source=(
-                    "nemo.word_confidence" if index < len(word_confidences) else None
+                    active_confidence_source if index < len(word_confidences) else None
                 ),
                 char_start=char_start,
                 char_end=char_end,
-                metadata=_word_metadata(timestamp),
+                metadata={
+                    **_word_metadata(timestamp),
+                    **(
+                        metadata_by_index[index]
+                        if index < len(metadata_by_index)
+                        and isinstance(metadata_by_index[index], dict)
+                        else {}
+                    ),
+                },
             )
         )
 
@@ -373,7 +400,8 @@ def build_words_and_alignment(
         notes=DEFAULT_ALIGNMENT_NOTES,
         metadata={
             "timestamp_source": "nemo.timestamp.word",
-            "confidence_source": "nemo.word_confidence",
+            "confidence_source": active_confidence_source,
+            "confidence_override_used": word_confidences_override is not None,
         },
     )
     return asr_words, alignment

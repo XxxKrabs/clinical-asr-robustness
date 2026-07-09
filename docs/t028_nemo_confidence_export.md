@@ -79,6 +79,20 @@ T028 初版曾沿用 NeMo 默认 `entropy_norm=exp`，但在 PriMock57
 
 可用 `--green-min`、`--yellow-min` 调整。
 
+
+## T043 词级 CTC frame-derived confidence 扩展
+
+2026-07-09 起，T028 导出脚本保留默认 NeMo `word_confidence` 行为，同时新增项目侧 CTC frame distribution → word confidence 开关：
+
+```bash
+/home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/export_nemo_asr_confidence.py \
+  --limit 1 \
+  --word-confidence-source ctc_frame_distribution \
+  --save-frame-distributions \
+  --frame-distribution-kind log_probs
+```
+
+该模式从 NeMo CTC Hypothesis 中保存的 frame `log_probs` 出发，按 `entropy/max_prob → CTC token collapse → BPE word 聚合` 重算 `asr_words[].confidence`，并把来源标记为 `ctc_frame_distribution.word_confidence`。如需保存 posterior artifact，可使用 `--frame-distribution-kind posterior`。详细设计见 `docs/t043_ctc_word_confidence.md`。
 ## 对齐规则
 
 导出脚本严格按 T027 的策略处理 NeMo 数组长度不一致：

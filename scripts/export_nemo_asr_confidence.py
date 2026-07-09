@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -23,6 +24,13 @@ from clinical_asr_robustness.asr_confidence import (
     ASRModelInfo,
     ConfidenceThresholds,
     write_asr_confidence_jsonl,
+)
+from clinical_asr_robustness.ctc_word_confidence import (
+    compute_ctc_word_confidence,
+    frame_scores_from_hypothesis,
+    normalize_frame_scores,
+    save_ctc_frame_distribution_artifact,
+    word_confidence_metadata,
 )
 from clinical_asr_robustness.nemo_confidence_export import (
     build_asr_confidence_record,
@@ -203,6 +211,33 @@ def parse_args() -> argparse.Namespace:
         default=0.33,
         help="论文 entropy/max_prob confidence 的 alpha/temperature 参数。",
     )
+    parser.add_argument(
+        "--word-confidence-source",
+        choices=["nemo_word_confidence", "ctc_frame_distribution"],
+        default="nemo_word_confidence",
+        help=(
+            "词级置信度来源。默认沿用 NeMo word_confidence；"
+            "ctc_frame_distribution 会从 Hypothesis 中保存的 frame log_probs/posterior "
+            "按 CTC entropy pipeline 重新聚合到 word。"
+        ),
+    )
+    parser.add_argument(
+        "--save-frame-distributions",
+        action="store_true",
+        help="保存每条音频的 CTC frame-level log_probs/posterior artifact，便于离线复算。",
+    )
+    parser.add_argument(
+        "--frame-distribution-kind",
+        choices=["log_probs", "posterior"],
+        default="log_probs",
+        help="保存 artifact 时写入 log_probs 还是 posterior；NeMo CTC forward 默认返回 log_probs。",
+    )
+    parser.add_argument(
+        "--frame-artifact-dir",
+        type=Path,
+        default=None,
+        help="帧级分布 artifact 输出目录；默认位于 output-jsonl 同级 ctc_frame_distributions/。",
+    )
     parser.add_argument("--green-min", type=float, default=0.80)
     parser.add_argument("--yellow-min", type=float, default=0.50)
     parser.add_argument("--segment-max-words", type=int, default=40)
@@ -306,18 +341,32 @@ def run_export(args: argparse.Namespace) -> tuple[list[Any], dict[str, Any]]:
         green_min=args.green_min,
         yellow_min=args.yellow_min,
     )
+    confidence_source_field = (
+        "ctc_frame_distribution.word_confidence"
+        if args.word_confidence_source == "ctc_frame_distribution"
+        else "word_confidence"
+    )
     confidence_config = ASRConfidenceConfig(
         method_name=args.confidence_method,
         entropy_type=args.entropy_type if args.confidence_method == "entropy" else None,
         alpha=args.confidence_alpha,
         entropy_norm=args.entropy_norm if args.confidence_method == "entropy" else None,
         aggregation=args.confidence_aggregation,
+        preserve_frame_confidence=True,
+        preserve_token_confidence=True,
+        preserve_word_confidence=True,
+        source_field=confidence_source_field,
         thresholds=thresholds,
         metadata={
             "note": (
-                "Values are NeMo normalized confidence scores in [0,1]. "
-                "Thresholds should be calibrated per model/dataset before clinical-style review."
-            )
+                "Values are normalized confidence scores in [0,1]. Thresholds should be "
+                "calibrated per model/dataset before clinical-style review."
+            ),
+            "word_confidence_source": args.word_confidence_source,
+            "ctc_frame_pipeline": (
+                "frame log_probs/posterior -> frame entropy confidence -> CTC token "
+                "aggregation -> word confidence"
+            ),
         },
     )
     runtime = {
@@ -361,6 +410,17 @@ def run_export(args: argparse.Namespace) -> tuple[list[Any], dict[str, Any]]:
     generated_at_utc = datetime.now(timezone.utc)
     output_records = []
     processed = 0
+    frame_artifact_dir = (
+        resolve_project_path(args.frame_artifact_dir)
+        if args.frame_artifact_dir is not None
+        else output_jsonl.parent / "ctc_frame_distributions"
+    )
+    should_compute_ctc_word_confidence = (
+        args.word_confidence_source == "ctc_frame_distribution"
+        or args.save_frame_distributions
+    )
+    ctc_artifacts_saved = 0
+    ctc_word_alignment_status_counts: dict[str, int] = {}
     for record_chunk, audio_chunk in zip(
         chunked(selected_records, args.transcribe_chunk_size),
         chunked(audio_paths, args.transcribe_chunk_size),
@@ -377,6 +437,73 @@ def run_export(args: argparse.Namespace) -> tuple[list[Any], dict[str, Any]]:
                 f"{len(hypotheses)} vs {len(record_chunk)}"
             )
         for manifest_record, hypothesis in zip(record_chunk, hypotheses, strict=True):
+            word_confidences_override = None
+            confidence_metadata_by_word = None
+            ctc_artifact_path_for_record = None
+            if should_compute_ctc_word_confidence:
+                frame_scores = frame_scores_from_hypothesis(hypothesis)
+                if frame_scores is None:
+                    raise RuntimeError(
+                        "Hypothesis 中没有二维 frame log_probs/logits；"
+                        "请确认 return_hypotheses=True 且当前模型为 CTC。"
+                    )
+                blank_id = resolve_ctc_blank_id(model, frame_scores)
+                token_texts_by_id = resolve_token_texts_by_id(model, frame_scores)
+                ctc_result = compute_ctc_word_confidence(
+                    frame_scores,
+                    score_type="log_probs",
+                    blank_id=blank_id,
+                    transcript=str(getattr(hypothesis, "text", "") or ""),
+                    token_texts_by_id=token_texts_by_id,
+                    method_name=args.confidence_method,
+                    entropy_type=args.entropy_type,
+                    alpha=args.confidence_alpha,
+                    entropy_norm=args.entropy_norm,
+                    token_aggregation=args.confidence_aggregation,
+                    word_aggregation=args.confidence_aggregation,
+                )
+                status = ctc_result.metadata["word_alignment_status"]
+                ctc_word_alignment_status_counts[status] = (
+                    ctc_word_alignment_status_counts.get(status, 0) + 1
+                )
+                if args.word_confidence_source == "ctc_frame_distribution":
+                    if not any(value is not None for value in ctc_result.word_confidences):
+                        raise RuntimeError(
+                            "CTC frame distribution 未能对齐出任何 word confidence；"
+                            "请检查 token_texts/blank_id 与 transcript word 对齐。"
+                        )
+                    word_confidences_override = ctc_result.word_confidences
+                if args.save_frame_distributions:
+                    sample_id = str(manifest_record.get("sample_id") or f"record_{processed}")
+                    artifact_path = frame_artifact_dir / f"{safe_filename(sample_id)}.npz"
+                    frame_values_to_save = frame_scores
+                    value_type_to_save = "log_probs"
+                    if args.frame_distribution_kind == "posterior":
+                        frame_values_to_save = normalize_frame_scores(
+                            frame_scores,
+                            "log_probs",
+                        )[0]
+                        value_type_to_save = "posterior"
+                    save_ctc_frame_distribution_artifact(
+                        artifact_path,
+                        frame_values=frame_values_to_save,
+                        value_type=value_type_to_save,
+                        result=ctc_result,
+                        transcript=str(getattr(hypothesis, "text", "") or ""),
+                        metadata={
+                            "sample_id": sample_id,
+                            "model_name": model_path.stem,
+                            "generated_at": generated_at_utc.isoformat(timespec="seconds"),
+                        },
+                    )
+                    ctc_artifacts_saved += 1
+                    ctc_artifact_path_for_record = path_for_record(artifact_path)
+                if args.word_confidence_source == "ctc_frame_distribution":
+                    confidence_metadata_by_word = word_confidence_metadata(
+                        ctc_result,
+                        artifact_path=ctc_artifact_path_for_record,
+                    )
+
             output_records.append(
                 build_asr_confidence_record(
                     manifest_record=manifest_record,
@@ -388,6 +515,13 @@ def run_export(args: argparse.Namespace) -> tuple[list[Any], dict[str, Any]]:
                     generated_at_utc=generated_at_utc,
                     segment_max_words=args.segment_max_words,
                     segment_max_gap_sec=args.segment_max_gap_sec,
+                    word_confidences_override=word_confidences_override,
+                    word_confidence_source=(
+                        "ctc_frame_distribution.word_confidence"
+                        if word_confidences_override is not None
+                        else None
+                    ),
+                    word_confidence_metadata_by_index=confidence_metadata_by_word,
                 )
             )
             processed += 1
@@ -411,6 +545,9 @@ def run_export(args: argparse.Namespace) -> tuple[list[Any], dict[str, Any]]:
         },
         "outputs": {
             "asr_confidence_jsonl": path_for_record(output_jsonl),
+            "ctc_frame_artifact_dir": (
+                path_for_record(frame_artifact_dir) if args.save_frame_distributions else None
+            ),
         },
         "model": model_info.model_dump(mode="json"),
         "decoding": decoding.model_dump(mode="json"),
@@ -423,6 +560,15 @@ def run_export(args: argparse.Namespace) -> tuple[list[Any], dict[str, Any]]:
                 and word_confidence_summary["p99"] is not None
                 and word_confidence_summary["p99"] < args.yellow_min
             ),
+            "ctc_frame_distribution": {
+                "computed": should_compute_ctc_word_confidence,
+                "word_confidence_source": args.word_confidence_source,
+                "frame_distribution_kind": args.frame_distribution_kind,
+                "artifacts_saved": ctc_artifacts_saved,
+                "word_alignment_status_counts": dict(
+                    sorted(ctc_word_alignment_status_counts.items())
+                ),
+            },
         },
         "runtime": runtime,
         "validation": {
@@ -443,6 +589,62 @@ def run_export(args: argparse.Namespace) -> tuple[list[Any], dict[str, Any]]:
     return output_records, run_summary
 
 
+def resolve_ctc_blank_id(model: Any, frame_scores: Any) -> int:
+    """尽量从 NeMo CTC 模型解析 blank id；失败时退回 vocab 最后一维。"""
+
+    decoding = getattr(model, "decoding", None)
+    for owner in (decoding, getattr(decoding, "decoding", None), getattr(model, "decoder", None)):
+        if owner is None:
+            continue
+        for attr in ("blank_id", "_blank_id", "blank_index", "_blank_index"):
+            value = getattr(owner, attr, None)
+            if value is not None:
+                return int(value)
+    decoder = getattr(model, "decoder", None)
+    value = getattr(decoder, "num_classes_with_blank", None)
+    if value is not None:
+        return int(value) - 1
+    shape = getattr(frame_scores, "shape", None)
+    if shape is not None and len(shape) == 2:
+        return int(shape[1]) - 1
+    raise RuntimeError("无法解析 CTC blank id")
+
+
+def resolve_token_texts_by_id(model: Any, frame_scores: Any) -> dict[int, str]:
+    """为 CTC token id 建立轻量 token string 映射，供 BPE word 边界聚合。"""
+
+    shape = getattr(frame_scores, "shape", None)
+    if shape is None or len(shape) != 2:
+        return {}
+    vocab_size = int(shape[1])
+    blank_id = resolve_ctc_blank_id(model, frame_scores)
+    decoding = getattr(model, "decoding", None)
+    if decoding is not None and hasattr(decoding, "decode_ids_to_tokens"):
+        token_texts: dict[int, str] = {}
+        for token_id in range(vocab_size):
+            if token_id == blank_id:
+                token_texts[token_id] = "<blank>"
+                continue
+            try:
+                decoded = decoding.decode_ids_to_tokens([token_id])
+                token_texts[token_id] = str(decoded[0]) if decoded else str(token_id)
+            except Exception:  # noqa: BLE001 - token 映射只用于诊断/聚合，失败可回退
+                token_texts[token_id] = str(token_id)
+        return token_texts
+
+    vocabulary = getattr(getattr(model, "decoder", None), "vocabulary", None)
+    if isinstance(vocabulary, list | tuple):
+        token_texts = {index: str(token) for index, token in enumerate(vocabulary)}
+        token_texts[blank_id] = "<blank>"
+        return token_texts
+    return {blank_id: "<blank>"}
+
+
+def safe_filename(value: str) -> str:
+    """把 sample_id 转成可用于 artifact 文件名的稳定字符串。"""
+
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
+    return safe or "unknown_sample"
 def _confidence_level_counts(records: list[Any]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:

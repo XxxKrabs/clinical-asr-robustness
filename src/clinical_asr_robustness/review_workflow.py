@@ -35,6 +35,9 @@ from clinical_asr_robustness.asr_confidence import (
     SourceChannel,
     UncertainSpan,
 )
+from clinical_asr_robustness.medical_entity_review import (
+    MEDICAL_ENTITY_REVIEW_METADATA_KEY,
+)
 
 REVIEW_SAMPLE_SCHEMA_VERSION = "asr_review_sample/v1"
 FEEDBACK_ENTRY_SCHEMA_VERSION = "doctor_feedback_entry/v1"
@@ -298,9 +301,47 @@ def review_priority_for_level(level: ConfidenceLevel) -> ReviewPriority:
     return ReviewPriority.ROUTINE
 
 
+def review_required_for_word(
+    word_level: ConfidenceLevel,
+    *,
+    span_ids: list[str],
+    medical_entity_gating_enabled: bool,
+) -> bool:
+    """判断一个词是否需要医生审阅。
+
+    医学实体 gating 开启后，只有落在医学实体 review span 内的词才需要审阅；
+    非医学词即使 ASR 置信度偏低，也只作为黑字上下文显示。
+    """
+
+    if span_ids:
+        return True
+    if medical_entity_gating_enabled:
+        return False
+    return word_level in {
+        ConfidenceLevel.YELLOW,
+        ConfidenceLevel.RED,
+        ConfidenceLevel.UNKNOWN,
+    }
+
+
+def review_priority_for_word(
+    word_level: ConfidenceLevel,
+    *,
+    span_ids: list[str],
+    medical_entity_gating_enabled: bool,
+) -> ReviewPriority:
+    """返回词级审阅优先级。"""
+
+    if span_ids or not medical_entity_gating_enabled:
+        return review_priority_for_level(word_level)
+    return ReviewPriority.ROUTINE
+
+
 def build_review_sample(record: ASRConfidenceRecord) -> ReviewSample:
     """把一条 ASR confidence record 转成审阅样本。"""
 
+    medical_review_policy = record.metadata.get(MEDICAL_ENTITY_REVIEW_METADATA_KEY)
+    medical_entity_gating_enabled = isinstance(medical_review_policy, dict)
     span_ids_by_word: dict[int, list[str]] = {}
     for span in record.uncertain_spans:
         for word_index in range(span.start_word_index, span.end_word_index):
@@ -315,10 +356,16 @@ def build_review_sample(record: ASRConfidenceRecord) -> ReviewSample:
             confidence=word.confidence,
             confidence_level=word.confidence_level,
             span_ids=span_ids_by_word.get(word.word_index, []),
-            review_required=bool(span_ids_by_word.get(word.word_index))
-            or word.confidence_level
-            in {ConfidenceLevel.YELLOW, ConfidenceLevel.RED, ConfidenceLevel.UNKNOWN},
-            review_priority=review_priority_for_level(word.confidence_level),
+            review_required=review_required_for_word(
+                word.confidence_level,
+                span_ids=span_ids_by_word.get(word.word_index, []),
+                medical_entity_gating_enabled=medical_entity_gating_enabled,
+            ),
+            review_priority=review_priority_for_word(
+                word.confidence_level,
+                span_ids=span_ids_by_word.get(word.word_index, []),
+                medical_entity_gating_enabled=medical_entity_gating_enabled,
+            ),
             speaker_label=word.speaker_label,
             metadata=word.metadata,
         )
@@ -358,9 +405,25 @@ def build_review_sample(record: ASRConfidenceRecord) -> ReviewSample:
                 "unknown": "missing confidence",
             },
             "actions": [action.value for action in ReviewFeedbackAction],
+            "target_scope": (
+                "llm_identified_medical_entities_only"
+                if medical_entity_gating_enabled
+                else "all_low_medium_unknown_confidence_words"
+            ),
             "note": (
-                "Green words are shown for context; yellow/red/unknown spans are the "
-                "primary review targets. Feedback is research data only."
+                (
+                    "Only LLM-identified medical entity words keep green/yellow/red "
+                    "display; non-medical words are neutral black context. "
+                    "Only non-green medical entity spans are primary review targets. "
+                )
+                if medical_entity_gating_enabled
+                else (
+                    "Green words are shown for context; yellow/red/unknown spans are "
+                    "the primary review targets. "
+                )
+            )
+            + (
+                "Feedback is research data only."
             ),
         },
         generated_from_schema_version=record.schema_version,
@@ -498,7 +561,7 @@ def read_feedback_entries_jsonl(path: str | Path) -> list[DoctorFeedbackEntry]:
 
     feedback_path = Path(path)
     entries: list[DoctorFeedbackEntry] = []
-    with feedback_path.open("r", encoding="utf-8") as file:
+    with feedback_path.open("r", encoding="utf-8-sig") as file:
         for line_number, line in enumerate(file, start=1):
             stripped = line.strip()
             if not stripped:
@@ -640,7 +703,7 @@ def apply_feedback_to_record(
             "generated_by": T035_GENERATED_BY,
             "source_feedback_entries": len(entries_by_span),
             "policy": {
-                "select_alternative": "replace span text with selected ASR candidate",
+                "select_alternative": "replace span text or target word with selected candidate",
                 "manual_edit": "replace span text with reviewer-provided text",
                 "accept_asr": "keep ASR text and mark span resolved",
                 "reject": "keep ASR text but mark span unresolved",
@@ -763,6 +826,8 @@ def build_review_html(
     .word.yellow {{ background: var(--yellow); border-color: var(--yellow-border); }}
     .word.red {{ background: var(--red); border-color: var(--red-border); }}
     .word.unknown {{ background: var(--unknown); border-color: #a0a7b5; }}
+    .word.neutral {{ background: transparent; border-color: transparent; color: var(--ink); }}
+    .word.medical-entity {{ font-weight: 600; }}
     .word.reviewable {{
       cursor: pointer;
       box-shadow: inset 0 -2px rgba(0,0,0,0.12);
@@ -839,14 +904,14 @@ def build_review_html(
 <body>
   <header>
     <h1>{html.escape(title)}</h1>
-    <p>研究 demo：展示 ASR noisy transcript 的词级/片段级置信度、绿/黄/红风险高亮和候选选择流程。</p>
+    <p>研究 demo：展示 ASR noisy transcript 的医学实体优先置信度高亮和候选选择流程。</p>
     <p>所有输出仅用于研究评估，不构成临床建议；请勿填入真实患者隐私或未脱敏病例内容。</p>
   </header>
   <main>
     <section id="samples"></section>
     <aside class="card" id="review-panel">
       <h2 class="panel-title">审阅面板</h2>
-      <p class="muted">点击黄色/红色片段后，可查看候选并记录反馈。</p>
+      <p class="muted">点击黄色/红色医学实体片段后，可查看候选并记录反馈。</p>
     </aside>
   </main>
   <script id="review-data" type="application/json">{sample_payload}</script>
@@ -880,12 +945,29 @@ def build_review_html(
       const container = document.getElementById('samples');
       container.innerHTML = SAMPLES.map(sample => {{
         const key = sampleKey(sample);
+        const medicalEntityMode = sample.review_policy?.target_scope === 'llm_identified_medical_entities_only';
+        const legend = medicalEntityMode ? `
+            <span class="badge"><span class="word green medical-entity">绿色</span> 医学实体高置信</span>
+            <span class="badge"><span class="word yellow medical-entity">黄色</span> 医学实体中置信</span>
+            <span class="badge"><span class="word red medical-entity">红色</span> 医学实体低置信</span>
+            <span class="badge"><span class="word unknown medical-entity">灰色</span> 医学实体缺失</span>
+            <span class="badge"><span class="word neutral">黑字</span> 非重点上下文</span>
+          ` : `
+            <span class="badge"><span class="word green">绿色</span> 高置信</span>
+            <span class="badge"><span class="word yellow">黄色</span> 中置信</span>
+            <span class="badge"><span class="word red">红色</span> 低置信</span>
+            <span class="badge"><span class="word unknown">灰色</span> 缺失</span>
+          `;
         const transcript = sample.words.map(word => {{
           const level = word.confidence_level || 'unknown';
+          const entityMeta = word.metadata?.medical_entity_review || {{}};
+          const displayLevel = entityMeta.display_confidence_level || level;
+          const isMedical = Boolean(entityMeta.is_medical_entity);
           const reviewable = word.span_ids && word.span_ids.length > 0;
-          const title = `#${{word.word_index}} confidence=${{confidenceText(word.confidence)}} level=${{level}}`;
+          const entityIds = entityMeta.entity_ids ? ` entities=${{entityMeta.entity_ids.join(',')}}` : '';
+          const title = `#${{word.word_index}} confidence=${{confidenceText(word.confidence)}} level=${{level}} display=${{displayLevel}}${{entityIds}}`;
           const firstSpan = reviewable ? word.span_ids[0] : '';
-          return `<span class="word ${{level}} ${{reviewable ? 'reviewable' : ''}}"
+          return `<span class="word ${{displayLevel}} ${{isMedical ? 'medical-entity' : ''}} ${{reviewable ? 'reviewable' : ''}}"
             data-sample-key="${{escapeHtml(key)}}"
             data-span-id="${{escapeHtml(firstSpan)}}"
             title="${{escapeHtml(title)}}">${{escapeHtml(word.text)}}</span>`;
@@ -906,13 +988,10 @@ def build_review_html(
             <span class="badge">${{escapeHtml(sample.confidence_level)}}</span>
           </h2>
           <div class="legend">
-            <span class="badge"><span class="word green">绿色</span> 高置信</span>
-            <span class="badge"><span class="word yellow">黄色</span> 中置信</span>
-            <span class="badge"><span class="word red">红色</span> 低置信</span>
-            <span class="badge"><span class="word unknown">灰色</span> 缺失</span>
+            ${{legend}}
           </div>
           <div class="transcript">${{transcript}}</div>
-          <div class="span-list">${{spans || '<p class="muted">无 uncertain span。</p>'}}</div>
+          <div class="span-list">${{spans || '<p class="muted">无需要确认的医学实体 span。</p>'}}</div>
         </article>`;
       }}).join('');
       container.querySelectorAll('.reviewable, .span-row').forEach(node => {{
@@ -1166,16 +1245,22 @@ def _apply_entry_to_span(
             raise ValueError(
                 f"候选 {alternative.alternative_id} 不属于 span {span.span_id}"
             )
+        confirmed_text = _confirmed_text_for_selected_alternative(span, alternative)
         return ConfirmedSpan(
             span_id=span.span_id,
             action=entry.action,
             original_text=span.text,
-            confirmed_text=alternative.text,
+            confirmed_text=confirmed_text,
             selected_alternative_id=alternative.alternative_id,
             selected_alternative_text=alternative.text,
             resolved=True,
             note=entry.note,
-            metadata={"feedback_id": entry.feedback_id},
+            metadata={
+                "feedback_id": entry.feedback_id,
+                "alternative_scope": alternative.scope,
+                "alternative_start_word_index": alternative.start_word_index,
+                "alternative_end_word_index": alternative.end_word_index,
+            },
         )
 
     if entry.action == ReviewFeedbackAction.MANUAL_EDIT:
@@ -1225,6 +1310,27 @@ def _alternative_by_id(record: ASRConfidenceRecord, alternative_id: str) -> ASRA
         if alternative.alternative_id == alternative_id:
             return alternative
     raise ValueError(f"反馈引用了未知 alternative_id：{alternative_id}")
+
+
+def _confirmed_text_for_selected_alternative(
+    span: UncertainSpan,
+    alternative: ASRAlternative,
+) -> str:
+    if alternative.scope != AlternativeScope.WORD:
+        return alternative.text
+    if alternative.start_word_index is None or alternative.end_word_index is None:
+        raise ValueError("word-level alternative must include start/end_word_index")
+    relative_start = alternative.start_word_index - span.start_word_index
+    relative_end = alternative.end_word_index - span.start_word_index
+    span_words = span.text.split()
+    if relative_start < 0 or relative_end > len(span_words) or relative_end <= relative_start:
+        raise ValueError(
+            f"word-level alternative {alternative.alternative_id} is outside span {span.span_id}"
+        )
+    replacement_words = alternative.text.split()
+    return " ".join(
+        [*span_words[:relative_start], *replacement_words, *span_words[relative_end:]]
+    )
 
 
 def _empty_if_none(value: Any) -> Any:

@@ -1,6 +1,6 @@
 # T030/T035/T036 ASR 置信度审阅样本、反馈回放与 HTML demo
 
-更新时间：2026-07-02
+更新时间：2026-07-07
 
 本文记录 ASR 输出层最小医生审阅 demo 的三个相邻任务：
 
@@ -25,6 +25,13 @@
 - `asr_words`：词级文本、时间戳、confidence、颜色等级；
 - `uncertain_spans`：连续黄/红/unknown 待审阅片段；
 - `asr_alternatives`：span-level 候选。
+
+若采用 T038 医学实体优先逻辑，T029 输入应先换成 T038 输出。此时：
+
+- 只有 LLM 识别出的医学实体词保留绿/黄/红/灰色；
+- 非医学词在 HTML 中显示为普通黑字；
+- `uncertain_spans` 只包含医学实体中非 green 的待确认片段；
+- T035 反馈回放也只要求这些医学实体 span 的反馈。
 
 示例命令：
 
@@ -112,7 +119,7 @@ wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python s
 
 页面能力：
 
-- 展示 ASR transcript 绿/黄/红/灰色高亮；
+- 展示 ASR transcript 的医学实体绿/黄/红/灰色高亮；非医学词可显示为普通黑字；
 - 点击 uncertain span 后显示置信度、候选列表和反馈表单；
 - 支持 `accept_asr`、`select_alternative`、`manual_edit`、`reject`、`unable_to_judge`；
 - 点击“提交并下载反馈 JSONL”后下载 `doctor_feedback_log.jsonl`；

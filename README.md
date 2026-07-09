@@ -2,14 +2,14 @@
 
 这是一个研究型 Python 项目，用于评估临床 ASR 转写噪声对病例信息整理任务的影响，并重点探索 **音频 → ASR → noisy transcript + 置信度 → 医生实时交互确认 → confirmed transcript** 的流程。
 
-2026-07-01 起，项目主线调整为：置信度主要来自 ASR 输出层，而不是 noisy→repair 的文本修复层。系统应在生成 noisy transcript 的同时保留词级、span 级或片段级置信度与 top-k 候选，让医生通过颜色提示和点击选择快速确认转写。医生反馈可作为后续 ASR 微调或候选排序扩展，但暂不作为近期主线。
+2026-07-01 起，项目主线调整为：置信度主要来自 ASR 输出层，而不是 noisy→repair 的文本修复层。系统应在生成 noisy transcript 的同时保留词级、span 级或片段级置信度与 top-k 候选，让医生通过颜色提示和点击选择快速确认转写。2026-07-07 起，审阅范围进一步调整为“医学实体优先”：先用 LLM 识别疾病、症状、药物、检查等医学实体，再只对这些实体显示绿/黄/红置信度和生成候选，其他上下文词显示为普通黑字。医生反馈可作为后续 ASR 微调或候选排序扩展，但暂不作为近期主线。
 
 ## 研究问题
 
 远程随访和医患对话中的 ASR 转写常见问题包括医学术语识别错误、药名错误、否定词遗漏、说话人混淆、重叠说话和口音导致的误识别。本项目当前关注三个层次：
 
 1. ASR 置信度主线：从音频生成 noisy transcript，同时输出词级/片段级置信度、时间戳和 top-k / n-best 候选；
-2. 医生交互确认：按置信度用绿色/黄色/红色提示风险，医生点击中低置信度片段选择、编辑或拒绝候选；
+2. 医生交互确认：优先对 LLM 识别出的医学实体按置信度用绿色/黄色/红色提示风险，医生点击中低置信度医学实体片段选择、编辑或拒绝候选；
 3. 下游鲁棒性评估：比较 raw ASR / doctor-confirmed / reference 输入对病例整理任务的影响。
 
 具体关注这些噪声如何影响：
@@ -21,9 +21,10 @@
 
 在系统形态上，计划引入医生实时审阅：
 
-- 高置信度 ASR 片段：绿色显示，默认低优先级审阅；
-- 中置信度 ASR 片段：黄色显示，医生可按需点击检查 top-k 候选；
-- 低置信度 ASR 片段：红色显示，优先提示医生确认；
+- 高置信度医学实体：绿色显示，默认低优先级审阅；
+- 中置信度医学实体：黄色显示，医生可按需点击检查 top-k 候选；
+- 低置信度医学实体：红色显示，优先提示医生确认；
+- 非医学实体上下文词：普通黑字显示，不进入候选生成和强制反馈；
 - 反馈数据：医生选择、编辑、拒绝和最终 confirmed transcript 先作为研究日志保存，后续可用于置信度校准、主动学习或 ASR/候选排序微调。
 
 ## 计划使用的数据集
@@ -55,6 +56,20 @@ AGENTS.md                        Codex 协作说明
 本项目当前实验默认使用 WSL Conda 环境 `clinical-asr`：
 
 ```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/run_asr_review_pipeline.py
+Start-Process outputs\primock57\t036_doctor_review_demo\doctor_review_demo.html
+```
+
+这条命令默认复用已有 T028/T037 ASR 输出，并自动生成医学实体优先审阅样本和最终 HTML demo：
+
+- `outputs/primock57/t036_doctor_review_demo/doctor_review_demo.html`
+- `outputs/primock57/asr_review_pipeline/asr_review_pipeline_run.json`
+
+如果需要从音频重新跑 NeMo ASR 与 n-best，增加 `--run-asr`；全量重跑增加 `--asr-limit 0`。更多参数见 `scripts/README.md` 和 `scripts/run_asr_review_pipeline.py --help`。
+
+常用验证：
+
+```powershell
 wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest --basetemp=.pytest_tmp
 wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check .
 ```
@@ -74,6 +89,16 @@ pytest
 - `docs/dataset_notes.md`
 - `configs/datasets.example.yaml`
 - `configs/eval_tasks.example.yaml`
+
+涉及外部 LLM API 的 T038 医学实体抽取默认支持项目根目录 `.env`：
+
+```dotenv
+API_KEY="<your-api-key>"
+BASE_URL="https://llmapi.paratera.com"
+MODEL_ID="Qwen3-Next-80B-A3B-Instruct"
+```
+
+`.env` 已被 `.gitignore` 忽略；可从 `.env.example` 复制后填写，不要提交真实密钥。
 
 ## 当前状态
 
