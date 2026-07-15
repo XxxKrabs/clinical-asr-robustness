@@ -2232,3 +2232,46 @@ prompt/response、反馈 JSONL、模型权重或可识别身份信息。原始 `
 40 例工程状态报告的统计口径同时固定：源样本盘点为 40 例，但当前 ASR、n-best 和
 diarization 实际覆盖为 5/40。该报告只用于展示样本总量、当前覆盖和工程成本，不能表述为
 “40 例已全部处理”，也不能替代人工 reference、真实 confirmed transcript 或正式质量结论。
+
+## 2026-07-15：T061 中文 40 例全量工程流水线与展示报告
+
+用户要求在已经跑通 1 例、完成固定 5 例 proxy 探索的基础上继续完成中文 40 例，并以可展示
+图/表验收。全量源 manifest 为 40 例、710.44 分钟。预处理器新增 `--resume`，会逐窗检查
+PCM16/16 kHz/mono 与完整文件覆盖后复用；并新增从连续 30 秒窗口流式重组整例 WAV 的脚本，
+避免长 MP3 重复解码。最终得到 1,442 个短窗和 40 个完整 WAV，均保留原 MP3 绝对时间轴。
+
+Hybrid auxiliary-CTC confidence 完成 1,442/1,442，共 75,228 个审阅单元，
+green/yellow/red=52,659/15,046/7,523。首次严格运行在 CTC token/word 无法对齐的窗口中断，
+因此新增显式 `--unaligned-confidence-policy all_red`：非空转写保留，但缺失 confidence 的单元
+全部设为 0/red，并写入原因与 `human_review_required`；最终 9 个窗口触发该兜底。另有 1 个空
+ASR 窗口和 21 个缺时间戳单元，全部进入汇总。confidence 转写 699.15 秒、RTF 0.0164，CUDA
+峰值 allocated 约 2.46 GiB。
+
+acoustic 5-best 完成 1,442/1,442，共 6,565 beams；1,440 个窗口有多个不同 beam。Streaming
+Sortformer 对 40 个整例 40/40 成功、失败 0。原始声学 ASR 单元映射为 67,348/75,228
+（89.53%），保守同人短空洞桥接后为 68,595/75,228（91.18%）；病例 macro 分别为
+88.9%/90.5%。没有人工 RTTM，映射覆盖不是 speaker 准确率，不报告 DER/JER。
+
+医学实体在线阶段复用固定 5 例缓存，并逐条增量落盘。一次 API 读取超时后缓存已到 1,433 条；
+补跑时遇到模型在合法 payload 后附加第二段 JSON，解析器原先报 `Extra data`。`parse_json_object`
+现用 `JSONDecoder.raw_decode` 提取首个完整 JSON 值，并增加回归测试。最终 1,442/1,442 完成：
+1,233 个输入 mention、1,036 个对齐、2,438 个医学高亮单元和 447 个黄/红医学 span。
+
+候选阶段读取 6,565 个 ASR 原生 beams，共生成 103 个局部 alternative，覆盖 85/447（19.0%）
+医学 span；同时生成 754 条完整病例上下文 LLM candidate prompt，但本轮不批量调用 API，避免
+把文本 repair 重新变成主线。病例审阅包包含 40 个会话、10,138 speaker turns、447 个 span；
+新增按病例拆分页面生成器，输出 40 个独立 HTML 和一个轻量索引。40 个索引链接和 80 个内联
+JavaScript 块通过 Node 语法检查。Codex in-app browser 两次初始化/诊断均超时，因此没有真实
+点击；自动 QA feedback 只验证 T035 确定性回放，并显式标为非人工、非医生确认。
+
+新增全量工程评估脚本，输出 40 行匿名病例 CSV、聚合 JSON/Markdown、HTML 与 5 张 SVG，展示
+病例时长、阶段覆盖、风险分布、speaker 映射和 n-best 可用性；卡片/表格另列 RTF、峰值显存、
+空窗口、全红兜底、缺时间戳和 85/447 候选覆盖。脱敏副本同步到
+`outputs/reporting_safe/chinese_all40_status/`。固定 5 例 proxy 报告继续单独给出 Proxy CER
+21.2%、CIPS 88.0%、黄+红可检测错误召回 79.5% 和病例摘要事实 F1 35.7%；不能把这些值外推
+成 40 例准确率。
+
+完整口径与产物见 `docs/t061_chinese_all40_engineering.md`。40 例工程目标已经完成；仍没有听
+音频的独立人工 reference、真实医生 confirmed transcript、人工 RTTM 或下游 gold，所以正式
+质量提升结论仍受阻。最终整仓 125 tests 通过、`ruff check .` 通过；5 张全量 SVG 均通过 XML
+解析，40 个页面的 80 个内联 JavaScript 块通过 Node 语法检查，索引包含 40 个病例链接。

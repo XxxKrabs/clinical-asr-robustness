@@ -7,8 +7,8 @@
 
 - `chinese_pilot5/`：固定中文 5 例代理参考 pilot 的逐例指标 CSV、汇总 Markdown/HTML 和
   5 张 SVG 图表。代理参考不是人工 reference，相关指标不得表述为正式临床质量结论。
-- `chinese_all40_status/`：40 例源样本的工程状态总览。当前实际 ASR、n-best 和 diarization
-  只覆盖 5/40；该目录不能作为“40 例已完成”的证据。
+- `chinese_all40_status/`：40/40 全量无参考工程总览，包含 40 行匿名病例指标、汇总
+  Markdown/HTML 和 5 张 SVG。它证明工程覆盖，不代表 ASR、speaker 或病例摘要准确率。
 - `week1/`：早期 ASR confidence review 流程总览图，不含转写正文或患者身份。
 
 ## 明确排除
@@ -23,7 +23,7 @@
 ## 来源
 
 - 中文 5 例：`outputs/remote_programming_40/t058_pilot5/report/`
-- 40 例工程状态：`outputs/remote_programming_40/t061_all40/report_qa/`
+- 40 例全量工程：`outputs/remote_programming_40/t061_all40/report/`
 - Week 1 总览：`outputs/reports/week1_asr_confidence_review_summary.png`
 
 同步日期：2026-07-15。

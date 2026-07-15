@@ -380,6 +380,17 @@ def test_llm_entity_json_parser_accepts_fenced_json() -> None:
     assert entities[0].entity_type == "symptom"
 
 
+def test_llm_entity_json_parser_accepts_valid_payload_before_extra_data() -> None:
+    payload = parse_json_object(
+        '{"entities":[{"text":"tremor","entity_type":"symptom"}]}\n'
+        '{"note":"duplicate explanation payload"}'
+    )
+    entities = coerce_medical_entity_mentions(payload)
+
+    assert len(entities) == 1
+    assert entities[0].text == "tremor"
+
+
 def test_project_env_file_resolves_llm_config_without_global_env(tmp_path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text(
