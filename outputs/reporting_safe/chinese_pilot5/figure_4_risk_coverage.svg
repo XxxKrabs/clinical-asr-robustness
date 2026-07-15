@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="520" viewBox="0 0 900 520">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>text{font-family:Arial,"Microsoft YaHei",sans-serif;fill:#222}.axis{stroke:#444;stroke-width:1}.grid{stroke:#ddd;stroke-width:1}.small{font-size:12px}.label{font-size:13px}.title{font-size:20px;font-weight:600}</style>
+<text x="450.0" y="32" text-anchor="middle" class="title">Risk-coverage curves (lower is better)</text>
+<text x="450.0" y="502" text-anchor="middle" class="label">Retained high-confidence coverage</text>
+<text x="20" y="257.5" text-anchor="middle" transform="rotate(-90 20 257.5)" class="label">Detectable error rate</text>
+<line x1="90.0" y1="75" x2="90.0" y2="440" class="grid"/>
+<line x1="90" y1="440.0" x2="865" y2="440.0" class="grid"/>
+<text x="90.0" y="462" text-anchor="middle" class="small">0.0</text>
+<text x="82" y="444.0" text-anchor="end" class="small">0.00</text>
+<line x1="245.0" y1="75" x2="245.0" y2="440" class="grid"/>
+<line x1="90" y1="367.0" x2="865" y2="367.0" class="grid"/>
+<text x="245.0" y="462" text-anchor="middle" class="small">0.2</text>
+<text x="82" y="371.0" text-anchor="end" class="small">0.03</text>
+<line x1="400.0" y1="75" x2="400.0" y2="440" class="grid"/>
+<line x1="90" y1="294.0" x2="865" y2="294.0" class="grid"/>
+<text x="400.0" y="462" text-anchor="middle" class="small">0.4</text>
+<text x="82" y="298.0" text-anchor="end" class="small">0.06</text>
+<line x1="555.0" y1="75" x2="555.0" y2="440" class="grid"/>
+<line x1="90" y1="221.0" x2="865" y2="221.0" class="grid"/>
+<text x="555.0" y="462" text-anchor="middle" class="small">0.6</text>
+<text x="82" y="225.0" text-anchor="end" class="small">0.09</text>
+<line x1="710.0" y1="75" x2="710.0" y2="440" class="grid"/>
+<line x1="90" y1="148.0" x2="865" y2="148.0" class="grid"/>
+<text x="710.0" y="462" text-anchor="middle" class="small">0.8</text>
+<text x="82" y="152.0" text-anchor="end" class="small">0.12</text>
+<line x1="865.0" y1="75" x2="865.0" y2="440" class="grid"/>
+<line x1="90" y1="75.0" x2="865" y2="75.0" class="grid"/>
+<text x="865.0" y="462" text-anchor="middle" class="small">1.0</text>
+<text x="82" y="79.0" text-anchor="end" class="small">0.14</text>
+<polyline points="128.8,440.0 167.5,440.0 206.2,440.0 245.0,440.0 283.8,440.0 322.5,440.0 361.2,440.0 400.0,440.0 438.8,440.0 477.5,440.0 516.2,440.0 555.0,440.0 593.8,440.0 632.5,430.1 671.2,430.8 710.0,422.7 748.8,419.7 787.5,409.3 826.2,371.0 865.0,312.2" fill="none" stroke="#4C78A8" stroke-width="2.5" stroke-linejoin="round"/>
+<line x1="90" y1="52" x2="112" y2="52" stroke="#4C78A8" stroke-width="3"/>
+<text x="118" y="57" class="small">0068</text>
+<polyline points="128.8,440.0 167.5,440.0 206.2,440.0 245.0,440.0 283.8,440.0 322.5,431.6 361.2,418.3 400.0,414.7 438.8,406.3 477.5,399.6 516.2,389.5 555.0,381.1 593.8,377.8 632.5,371.4 671.2,359.1 710.0,342.0 748.8,321.0 787.5,308.0 826.2,272.4 865.0,219.9" fill="none" stroke="#F58518" stroke-width="2.5" stroke-linejoin="round"/>
+<line x1="210" y1="52" x2="232" y2="52" stroke="#F58518" stroke-width="3"/>
+<text x="238" y="57" class="small">0057</text>
+<polyline points="128.8,440.0 167.5,413.6 206.2,422.4 245.0,413.5 283.8,413.5 322.5,400.2 361.2,394.6 400.0,396.9 438.8,372.2 477.5,363.1 516.2,353.2 555.0,336.1 593.8,313.5 632.5,288.4 671.2,279.1 710.0,262.6 748.8,238.7 787.5,213.0 826.2,180.3 865.0,113.6" fill="none" stroke="#54A24B" stroke-width="2.5" stroke-linejoin="round"/>
+<line x1="330" y1="52" x2="352" y2="52" stroke="#54A24B" stroke-width="3"/>
+<text x="358" y="57" class="small">0040</text>
+<polyline points="128.8,440.0 167.5,440.0 206.2,440.0 245.0,440.0 283.8,440.0 322.5,413.2 361.2,409.2 400.0,413.1 438.8,416.1 477.5,413.1 516.2,405.8 555.0,390.7 593.8,378.0 632.5,367.0 671.2,350.3 710.0,339.1 748.8,329.3 787.5,311.5 826.2,284.3 865.0,238.1" fill="none" stroke="#E45756" stroke-width="2.5" stroke-linejoin="round"/>
+<line x1="450" y1="52" x2="472" y2="52" stroke="#E45756" stroke-width="3"/>
+<text x="478" y="57" class="small">0008</text>
+<polyline points="128.8,390.0 167.5,400.0 206.2,410.0 245.0,417.5 283.8,414.0 322.5,418.3 361.2,411.4 400.0,405.0 438.8,397.7 477.5,389.0 516.2,381.8 555.0,372.4 593.8,361.5 632.5,349.2 671.2,330.6 710.0,307.4 748.8,275.8 787.5,237.1 826.2,184.0 865.0,108.2" fill="none" stroke="#B279A2" stroke-width="2.5" stroke-linejoin="round"/>
+<line x1="570" y1="52" x2="592" y2="52" stroke="#B279A2" stroke-width="3"/>
+<text x="598" y="57" class="small">0021</text>
+<line x1="90" y1="75" x2="90" y2="440" class="axis"/>
+<line x1="90" y1="440" x2="865" y2="440" class="axis"/>
+</svg>

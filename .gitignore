@@ -40,6 +40,8 @@ outputs/*
 !outputs/.gitkeep
 !data/README.md
 !outputs/README.md
+!outputs/reporting_safe/
+!outputs/reporting_safe/**
 
 # 常见大文件
 *.wav

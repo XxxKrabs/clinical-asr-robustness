@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>中文 5 例 ASR 代理参考鲁棒性 pilot</title>
+  <style>
+    :root { color-scheme: light; --ink:#183153; --muted:#5b6b7c; --line:#d9e2ec; }
+    * { box-sizing:border-box; }
+    body {
+      margin:0; font:15px/1.55 system-ui,"Microsoft YaHei",sans-serif;
+      color:#172b4d; background:#f5f7fa;
+    }
+    main { max-width:1180px; margin:auto; padding:32px 24px 64px; }
+    h1,h2 { color:var(--ink); }
+    .warning { border-left:5px solid #d97706; padding:12px 16px; background:#fff7ed; }
+    .metrics {
+      display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+      gap:12px; margin:22px 0;
+    }
+    .metric,figure,.table-wrap {
+      background:white; border:1px solid var(--line); border-radius:12px;
+      box-shadow:0 4px 14px #16324f0d;
+    }
+    .metric { padding:16px; }
+    .metric span { display:block; color:var(--muted); }
+    .metric strong { font-size:25px; color:var(--ink); }
+    .table-wrap { overflow:auto; }
+    table { width:100%; border-collapse:collapse; }
+    th,td {
+      padding:10px 12px; border-bottom:1px solid var(--line);
+      text-align:right; white-space:nowrap;
+    }
+    th:first-child,td:first-child { text-align:left; }
+    th { background:#edf2f7; }
+    .figures {
+      display:grid; grid-template-columns:repeat(auto-fit,minmax(440px,1fr)); gap:16px;
+    }
+    figure { margin:0; padding:12px; }
+    img { display:block; width:100%; height:auto; }
+    figcaption { color:var(--muted); text-align:center; margin-top:6px; }
+    footer { color:var(--muted); margin-top:26px; }
+    @media (max-width:600px) {
+      main { padding:20px 12px 40px; }
+      .figures { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body><main>
+  <h1>中文 5 例 ASR 代理参考鲁棒性 pilot</h1>
+  <p class="warning"><strong>研究输出，不构成临床建议。</strong>
+    质量指标使用未听音频的 LLM 多路自动转录代理参考，不是人工 clean/reference，
+    也不能用于正式质量结论。</p>
+  <p>工程覆盖：5 例，
+    74.60 分钟，
+    152 个 ASR 窗口，
+    9458 个审阅单元，
+    diarization 5/5。</p>
+  <section class="metrics"><div class="metric"><span>Proxy CER</span><strong>21.2%</strong></div><div class="metric"><span>CIPS</span><strong>88.0%</strong></div><div class="metric"><span>代理事实文本召回</span><strong>75.1%</strong></div><div class="metric"><span>黄+红可检测错误召回</span><strong>79.5%</strong></div><div class="metric"><span>审阅字符比例</span><strong>28.8%</strong></div><div class="metric"><span>Proxy word ECE</span><strong>0.0510</strong></div><div class="metric"><span>声学 speaker 映射覆盖</span><strong>91.0%</strong></div><div class="metric"><span>病例摘要事实 F1</span><strong>35.7%</strong></div></section>
+  <h2>逐例指标</h2>
+  <div class="table-wrap"><table><thead><tr>
+    <th>case</th><th>min</th><th>K</th><th>CER</th><th>CIPS</th>
+    <th>fact recall</th><th>review load</th><th>error recall</th>
+    <th>speaker map</th><th>summary F1</th>
+  </tr></thead><tbody><tr><td>case_0068</td><td>4.7</td><td>2</td><td>14.4%</td><td>78.8%</td><td>80.0%</td><td>16.0%</td><td>86.5%</td><td>93.9%</td><td>16.0%</td></tr><tr><td>case_0057</td><td>5.0</td><td>6</td><td>14.8%</td><td>100.0%</td><td>100.0%</td><td>24.0%</td><td>70.1%</td><td>86.3%</td><td>61.5%</td></tr><tr><td>case_0040</td><td>12.7</td><td>6</td><td>29.7%</td><td>88.3%</td><td>66.7%</td><td>40.4%</td><td>81.3%</td><td>91.6%</td><td>27.0%</td></tr><tr><td>case_0008</td><td>14.3</td><td>4</td><td>22.6%</td><td>87.3%</td><td>88.9%</td><td>33.4%</td><td>78.7%</td><td>91.1%</td><td>53.3%</td></tr><tr><td>case_0021</td><td>37.9</td><td>5</td><td>24.5%</td><td>85.6%</td><td>40.0%</td><td>30.4%</td><td>81.1%</td><td>91.9%</td><td>20.8%</td></tr></tbody></table></div>
+  <h2>图表</h2>
+  <section class="figures"><figure><img src="figure_1_engineering_coverage.svg" alt="figure 1 engineering coverage" loading="lazy"><figcaption>figure 1 engineering coverage</figcaption></figure><figure><img src="figure_2_proxy_robustness_metrics.svg" alt="figure 2 proxy robustness metrics" loading="lazy"><figcaption>figure 2 proxy robustness metrics</figcaption></figure><figure><img src="figure_3_risk_color_stratification.svg" alt="figure 3 risk color stratification" loading="lazy"><figcaption>figure 3 risk color stratification</figcaption></figure><figure><img src="figure_4_risk_coverage.svg" alt="figure 4 risk coverage" loading="lazy"><figcaption>figure 4 risk coverage</figcaption></figure><figure><img src="figure_5_downstream_case_summary_robustness.svg" alt="figure 5 downstream case summary robustness" loading="lazy"><figcaption>figure 5 downstream case summary robustness</figcaption></figure></section>
+  <footer>CIPS 为本项目自定义病例关键信息保持指标；颜色错误召回不包含无法着色的
+    deletion。正式结论必须换用独立人工 reference、真实人工 confirmed transcript 与下游
+    gold facts。</footer>
+</main></body></html>

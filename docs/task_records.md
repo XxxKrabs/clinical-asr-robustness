@@ -2216,3 +2216,19 @@ SVG。交互页面位于
 最终整仓 120 tests 通过、`ruff check .` 通过，2 个内联 JavaScript 块通过 Node 语法解析，5 张
 SVG 均通过 XML 结构检查。下一步优先完成 1 例真实浏览器试审和固定 5 例听音频 reference，
 再决定是否扩到 40/40。
+
+## 2026-07-15：脱敏汇报输出包与远程发布边界
+
+为支持阶段汇报，在不改变 `outputs/` 默认忽略策略的前提下新增
+`outputs/reporting_safe/`，并在 `.gitignore` 中只对白名单子目录开放跟踪。安全包共包含
+17 个汇报产物：中文 5 例代理参考 pilot 的 CSV、Markdown、HTML 与 5 张 SVG；40 例源样本
+工程状态的 CSV、Markdown、HTML 与 5 张 SVG；以及 Week 1 ASR confidence review 总览 PNG。
+
+上传前逐项检查文件类型、字段和敏感模式。安全包只包含匿名 `case_xxxx`、时长、窗口数、
+风险颜色计数、覆盖率和聚合质量指标；没有原始音频、逐例转写、病例正文、LLM
+prompt/response、反馈 JSONL、模型权重或可识别身份信息。原始 `outputs/` 共约 805 MiB，
+其中 JSONL、交互 HTML、NPZ 和日志继续保持忽略，不强制提交。
+
+40 例工程状态报告的统计口径同时固定：源样本盘点为 40 例，但当前 ASR、n-best 和
+diarization 实际覆盖为 5/40。该报告只用于展示样本总量、当前覆盖和工程成本，不能表述为
+“40 例已全部处理”，也不能替代人工 reference、真实 confirmed transcript 或正式质量结论。

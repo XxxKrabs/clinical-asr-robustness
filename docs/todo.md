@@ -126,6 +126,7 @@ LLM 多路 ASR 融合代理参考明确不是人工 gold；基于它的探索结
 
 | 日期 | 任务 | 摘要 |
 |---|---|---|
+| 2026-07-15 | 脱敏汇报输出包 | 新增 `outputs/reporting_safe/`，纳入中文 5 例代理评估、40 例工程状态和 Week 1 流程总览共 17 个安全汇报产物；仅含匿名病例编号、聚合指标和静态图表，不含音频、转写正文、病例正文、prompt/response 或反馈日志。40 例状态页明确当前实际处理覆盖仍为 5/40。 |
 | 2026-07-15 | T058/T064/T066/T070 中文 5 例代理鲁棒性 pilot | 固定 5 例 74.60 分钟完成 152/152 confidence 与 5-best、5/5 Sortformer、152/152 医学实体筛选、5 例交互页和 10/10 noisy/proxy 病例摘要。探索结果：Proxy CER 21.2%、CIPS 88.0%、黄+红错误召回 79.5%、审阅字符比例 28.8%、摘要事实 F1 35.7%；输出 CSV/Markdown/run JSON 与 5 张 SVG。代理参考非人工 gold，浏览器真实点击与 confirmed transcript 仍待完成。 |
 | 2026-07-15 | T070 LLM speaker 语义全连接实验 | 新增完整病例级 `semantic_speaker_resolution/v1` 与 `.env` 驱动脚本；一次 `Qwen3-Coder-Plus` 请求严格覆盖首例剩余 20/20 gaps、31/31 字词，unknown 31→0、turns 67→43，状态单列为 `semantic_complete`。6 个高置信、14 个中置信、3 个 `uncertain_best_guess`；原 acoustic 空值/状态全部保留，页面标记“含语义补全”。108 tests/ruff 与 HTML JavaScript 语法通过。 |
 | 2026-07-15 | T070 同一说话人短空洞桥接 | 新增可审计的 `same_speaker_short_gap_bridge/v1`：只桥接前后同 speaker、≤1.5 秒且原状态为 `no_overlap`/`insufficient_overlap` 的空洞，不桥接 `ambiguous_overlap` 或不同 speaker 边界；首例桥接 14 个单元，展示覆盖 95.73%，`speaker_unknown` 45→31，speaker turns 89→67；原始声学覆盖仍单列为 93.80%。105 tests/ruff 通过。 |

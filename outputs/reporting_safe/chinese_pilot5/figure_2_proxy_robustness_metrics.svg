@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>text{font-family:Arial,"Microsoft YaHei",sans-serif;fill:#222}.axis{stroke:#444;stroke-width:1}.grid{stroke:#ddd;stroke-width:1}.small{font-size:12px}.label{font-size:13px}.title{font-size:20px;font-weight:600}</style>
+<text x="450.0" y="32" text-anchor="middle" class="title">Transcript and critical-information robustness (proxy reference)</text>
+<text x="18" y="242.5" text-anchor="middle" transform="rotate(-90 18 242.5)" class="label">Rate</text>
+<line x1="85" y1="410.0" x2="870" y2="410.0" class="grid"/>
+<text x="77" y="414.0" text-anchor="end" class="small">0.00</text>
+<line x1="85" y1="343.0" x2="870" y2="343.0" class="grid"/>
+<text x="77" y="347.0" text-anchor="end" class="small">0.20</text>
+<line x1="85" y1="276.0" x2="870" y2="276.0" class="grid"/>
+<text x="77" y="280.0" text-anchor="end" class="small">0.40</text>
+<line x1="85" y1="209.0" x2="870" y2="209.0" class="grid"/>
+<text x="77" y="213.0" text-anchor="end" class="small">0.60</text>
+<line x1="85" y1="142.0" x2="870" y2="142.0" class="grid"/>
+<text x="77" y="146.0" text-anchor="end" class="small">0.80</text>
+<line x1="85" y1="75.0" x2="870" y2="75.0" class="grid"/>
+<text x="77" y="79.0" text-anchor="end" class="small">1.00</text>
+<line x1="85" y1="75" x2="85" y2="410" class="axis"/>
+<line x1="85" y1="410" x2="870" y2="410" class="axis"/>
+<rect x="108.0" y="361.6" width="35.7" height="48.4" fill="#E45756" rx="2"/>
+<text x="125.8" y="357.6" text-anchor="middle" class="small">0.14</text>
+<rect x="145.7" y="146.1" width="35.7" height="263.9" fill="#54A24B" rx="2"/>
+<text x="163.5" y="142.1" text-anchor="middle" class="small">0.79</text>
+<rect x="183.3" y="142.0" width="35.7" height="268.0" fill="#F2CF5B" rx="2"/>
+<text x="201.2" y="138.0" text-anchor="middle" class="small">0.80</text>
+<text x="163.5" y="434" text-anchor="middle" class="label">0068</text>
+<rect x="265.0" y="360.5" width="35.7" height="49.5" fill="#E45756" rx="2"/>
+<text x="282.8" y="356.5" text-anchor="middle" class="small">0.15</text>
+<rect x="302.7" y="75.0" width="35.7" height="335.0" fill="#54A24B" rx="2"/>
+<text x="320.5" y="86.0" text-anchor="middle" class="small">1.00</text>
+<rect x="340.3" y="75.0" width="35.7" height="335.0" fill="#F2CF5B" rx="2"/>
+<text x="358.2" y="86.0" text-anchor="middle" class="small">1.00</text>
+<text x="320.5" y="434" text-anchor="middle" class="label">0057</text>
+<rect x="422.0" y="310.4" width="35.7" height="99.6" fill="#E45756" rx="2"/>
+<text x="439.8" y="306.4" text-anchor="middle" class="small">0.30</text>
+<rect x="459.7" y="114.1" width="35.7" height="295.9" fill="#54A24B" rx="2"/>
+<text x="477.5" y="110.1" text-anchor="middle" class="small">0.88</text>
+<rect x="497.3" y="186.7" width="35.7" height="223.3" fill="#F2CF5B" rx="2"/>
+<text x="515.2" y="182.7" text-anchor="middle" class="small">0.67</text>
+<text x="477.5" y="434" text-anchor="middle" class="label">0040</text>
+<rect x="579.0" y="334.3" width="35.7" height="75.7" fill="#E45756" rx="2"/>
+<text x="596.8" y="330.3" text-anchor="middle" class="small">0.23</text>
+<rect x="616.7" y="117.6" width="35.7" height="292.4" fill="#54A24B" rx="2"/>
+<text x="634.5" y="113.6" text-anchor="middle" class="small">0.87</text>
+<rect x="654.3" y="112.2" width="35.7" height="297.8" fill="#F2CF5B" rx="2"/>
+<text x="672.2" y="108.2" text-anchor="middle" class="small">0.89</text>
+<text x="634.5" y="434" text-anchor="middle" class="label">0008</text>
+<rect x="736.0" y="328.1" width="35.7" height="81.9" fill="#E45756" rx="2"/>
+<text x="753.8" y="324.1" text-anchor="middle" class="small">0.24</text>
+<rect x="773.7" y="123.1" width="35.7" height="286.9" fill="#54A24B" rx="2"/>
+<text x="791.5" y="119.1" text-anchor="middle" class="small">0.86</text>
+<rect x="811.3" y="276.0" width="35.7" height="134.0" fill="#F2CF5B" rx="2"/>
+<text x="829.2" y="272.0" text-anchor="middle" class="small">0.40</text>
+<text x="791.5" y="434" text-anchor="middle" class="label">0021</text>
+<rect x="85" y="47" width="14" height="14" fill="#E45756" rx="2"/>
+<text x="105" y="59" class="small">Proxy CER (lower better)</text>
+<rect x="273" y="47" width="14" height="14" fill="#54A24B" rx="2"/>
+<text x="293" y="59" class="small">CIPS (higher better)</text>
+<rect x="433" y="47" width="14" height="14" fill="#F2CF5B" rx="2"/>
+<text x="453" y="59" class="small">Proxy fact recall</text>
+</svg>
