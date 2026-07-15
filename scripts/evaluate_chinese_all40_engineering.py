@@ -318,6 +318,14 @@ def build_aggregate(rows: list[dict[str, Any]], runs: dict[str, Any]) -> dict[st
     medical_validation = (runs.get("medical_entities") or {}).get("validation") or {}
     candidate_validation = (runs.get("candidates") or {}).get("validation") or {}
     review_validation = (runs.get("review") or {}).get("validation") or {}
+    ctc_distribution = (
+        (asr_run.get("confidence_distribution") or {}).get(
+            "ctc_frame_distribution"
+        )
+        or {}
+    )
+    candidate_span_count = candidate_validation.get("total_uncertain_spans")
+    candidate_covered_count = candidate_validation.get("spans_with_alternatives")
     return {
         "source_case_count": len(rows),
         "source_duration_min": sum(float(row["source_duration_sec"]) for row in rows) / 60,
@@ -332,6 +340,9 @@ def build_aggregate(rows: list[dict[str, Any]], runs: dict[str, Any]) -> dict[st
         ),
         "missing_word_timestamp_count": sum(
             int(row["missing_word_timestamp_count"]) for row in rows
+        ),
+        "unaligned_confidence_fallback_count": ctc_distribution.get(
+            "unaligned_fallback_count", 0
         ),
         "risk_word_counts": risk_counts,
         "risk_word_fractions": {
@@ -366,9 +377,12 @@ def build_aggregate(rows: list[dict[str, Any]], runs: dict[str, Any]) -> dict[st
         "medical_entity_review_spans": medical_validation.get(
             "medical_entity_review_spans"
         ),
-        "candidate_total_uncertain_spans": candidate_validation.get("total_uncertain_spans"),
-        "candidate_spans_with_alternatives": candidate_validation.get(
-            "spans_with_alternatives"
+        "candidate_total_uncertain_spans": candidate_span_count,
+        "candidate_spans_with_alternatives": candidate_covered_count,
+        "candidate_span_coverage": (
+            candidate_covered_count / candidate_span_count
+            if candidate_span_count and candidate_covered_count is not None
+            else None
         ),
         "review_conversation_count": review_validation.get("conversation_count"),
         "review_speaker_turn_count": review_validation.get("speaker_turn_count"),
@@ -395,6 +409,9 @@ def pct(value: Any) -> str:
 
 def write_markdown(path: Path, payload: dict[str, Any]) -> None:
     aggregate = payload["aggregate"]
+    asr_peak_gib = float(
+        aggregate["asr_runtime"].get("cuda_peak_memory_allocated_bytes") or 0
+    ) / (1024**3)
     lines = [
         "# 中文 40 例 ASR 工程运行总览",
         "",
@@ -414,6 +431,11 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
             f"{aggregate['asr_word_count']}；空窗口：{aggregate['empty_asr_record_count']}；"
         ),
         (
+            "- 对齐失败全红兜底/缺失单元时间戳："
+            f"{aggregate['unaligned_confidence_fallback_count']}/"
+            f"{aggregate['missing_word_timestamp_count']}；"
+        ),
+        (
             "- green/yellow/red："
             f"{aggregate['risk_word_counts']['green']}/"
             f"{aggregate['risk_word_counts']['yellow']}/"
@@ -423,6 +445,19 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
             "- speaker 原始/桥接后映射覆盖："
             f"{pct(aggregate['macro_acoustic_speaker_mapping_coverage'])}/"
             f"{pct(aggregate['macro_resolved_speaker_mapping_coverage'])}。"
+        ),
+        (
+            "- 医学待审 span/有候选 span/候选覆盖："
+            f"{aggregate['candidate_total_uncertain_spans']}/"
+            f"{aggregate['candidate_spans_with_alternatives']}/"
+            f"{pct(aggregate['candidate_span_coverage'])}；"
+        ),
+        (
+            "- ASR/n-best RTF："
+            f"{float(aggregate['asr_runtime'].get('real_time_factor') or 0):.4f}/"
+            f"{float(aggregate['nbest_runtime'].get('real_time_factor') or 0):.4f}；"
+            f"ASR CUDA 峰值 allocated："
+            f"{asr_peak_gib:.2f} GiB。"
         ),
         "",
         "## 逐例工程表",
@@ -562,15 +597,31 @@ def build_figures(
 
 def write_html(path: Path, payload: dict[str, Any], figures: list[Path]) -> None:
     aggregate = payload["aggregate"]
+    asr_peak_gib = float(
+        aggregate["asr_runtime"].get("cuda_peak_memory_allocated_bytes") or 0
+    ) / (1024**3)
     cards = [
         ("病例覆盖", f"{aggregate['asr_case_count']}/40"),
         ("音频时长", f"{aggregate['source_duration_min']:.1f} min"),
         ("ASR 窗口", str(aggregate["asr_record_count"])),
         ("ASR 单元", str(aggregate["asr_word_count"])),
         ("空 ASR 窗口", str(aggregate["empty_asr_record_count"])),
+        ("全红兜底窗口", str(aggregate["unaligned_confidence_fallback_count"])),
+        ("缺时间戳单元", str(aggregate["missing_word_timestamp_count"])),
         ("n-best beams", str(aggregate["nbest_beam_count"])),
+        (
+            "医学候选覆盖",
+            f"{aggregate['candidate_spans_with_alternatives']}/"
+            f"{aggregate['candidate_total_uncertain_spans']} "
+            f"({pct(aggregate['candidate_span_coverage'])})",
+        ),
         ("diarization", f"{aggregate['diarization_case_count']}/40"),
         ("speaker map", pct(aggregate["macro_acoustic_speaker_mapping_coverage"])),
+        ("ASR RTF", f"{float(aggregate['asr_runtime'].get('real_time_factor') or 0):.4f}"),
+        (
+            "ASR CUDA peak",
+            f"{asr_peak_gib:.2f} GiB",
+        ),
     ]
     card_html = "".join(
         f'<div class="card"><span>{escape(label)}</span><strong>{escape(value)}</strong></div>'

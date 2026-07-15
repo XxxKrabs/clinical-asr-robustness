@@ -529,6 +529,17 @@ def parse_json_object(content: str) -> Any:
     if not starts:
         raise ValueError("LLM 输出中找不到 JSON object/list")
     start = min(starts)
+
+    # Some otherwise valid model responses append an explanation or a second JSON
+    # value after the requested payload. ``json.loads`` rejects that as ``Extra
+    # data``. Decode the first complete JSON value from the first object/list
+    # boundary so one malformed suffix does not abort an entire cached batch.
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(stripped[start:])
+        return payload
+    except json.JSONDecodeError:
+        pass
+
     end_object = stripped.rfind("}")
     end_list = stripped.rfind("]")
     end = max(end_object, end_list)

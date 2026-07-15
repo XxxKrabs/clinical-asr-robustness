@@ -7,7 +7,7 @@ from clinical_asr_robustness.svg_charts import (
     write_stacked_bar_svg,
 )
 from scripts.assemble_full_audio_from_windows import group_windows, validate_windows
-from scripts.evaluate_chinese_all40_engineering import case_id_from_values
+from scripts.evaluate_chinese_all40_engineering import build_aggregate, case_id_from_values
 
 
 def test_case_id_from_values_supports_manifest_and_sample_id() -> None:
@@ -82,3 +82,39 @@ def test_svg_helpers_support_wide_rotated_and_stacked_charts(tmp_path: Path) -> 
     assert "green" in stacked
     assert "red" in stacked
     assert stacked.count("<rect") >= 7
+
+
+def test_all40_aggregate_exposes_fallback_and_candidate_coverage() -> None:
+    row = {
+        "source_duration_sec": 60.0,
+        "window_count": 2,
+        "asr_record_count": 2,
+        "empty_asr_record_count": 0,
+        "timestamp_order_violation_count": 0,
+        "missing_word_timestamp_count": 1,
+        "green_words": 7,
+        "yellow_words": 2,
+        "red_words": 1,
+        "mean_word_confidence": 0.9,
+        "nbest_record_count": 2,
+        "nbest_beam_count": 9,
+        "nbest_multiple_record_count": 2,
+        "detected_speakers": 2,
+        "acoustic_speaker_mapping_coverage": 0.8,
+        "resolved_speaker_mapping_coverage": 0.9,
+    }
+    runs = {
+        "confidence": {
+            "confidence_distribution": {
+                "ctc_frame_distribution": {"unaligned_fallback_count": 1}
+            }
+        },
+        "candidates": {
+            "validation": {"total_uncertain_spans": 5, "spans_with_alternatives": 2}
+        },
+    }
+
+    aggregate = build_aggregate([row], runs)
+
+    assert aggregate["unaligned_confidence_fallback_count"] == 1
+    assert aggregate["candidate_span_coverage"] == pytest.approx(0.4)

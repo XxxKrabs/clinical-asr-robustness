@@ -131,6 +131,42 @@ wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python s
 `docs/t058_t066_chinese_pilot5_robustness.md`；1 例底层接入细节见
 `docs/t051_t060_chinese_asr_integration.md`。
 
+### 中文 40 例全量工程报告与拆分页
+
+全量运行使用 `preprocess_asr_audio.py --resume` 复用已经通过格式校验的 30 秒窗口；
+`assemble_full_audio_from_windows.py` 从连续窗口流式重组每例完整 WAV，避免再次解码 MP3。
+confidence 遇到无法对齐的 CTC 单元时使用显式
+`--unaligned-confidence-policy all_red`，保留转写并强制全红人工复核，不能静默设成高置信。
+
+完成 confidence、5-best、Sortformer、医学实体和候选后，先生成不带超大单页 HTML 的审阅
+JSONL，再按病例拆页：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/build_asr_review_samples.py `
+  --input-jsonl outputs/remote_programming_40/t061_all40/asr_candidates_diarized.jsonl `
+  --output-jsonl outputs/remote_programming_40/t061_all40/review_samples.jsonl `
+  --conversation-jsonl outputs/remote_programming_40/t061_all40/review_conversations.jsonl `
+  --output-csv outputs/remote_programming_40/t061_all40/review_spans.csv `
+  --run-config-json outputs/remote_programming_40/t061_all40/review_run.json `
+  --no-html
+
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/build_split_doctor_review_pages.py `
+  --review-jsonl outputs/remote_programming_40/t061_all40/review_samples.jsonl `
+  --output-dir outputs/remote_programming_40/t061_all40/review_pages/pages `
+  --index-html outputs/remote_programming_40/t061_all40/review_pages/index.html `
+  --run-summary-json outputs/remote_programming_40/t061_all40/split_review_run.json `
+  --title "中文 40 例 ASR 置信度交互审阅"
+```
+
+生成 40 行 CSV、Markdown、HTML 和五张无第三方依赖 SVG：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/evaluate_chinese_all40_engineering.py
+```
+
+全量报告只描述覆盖、RTF/显存、风险、候选、speaker 映射和异常显式率；没有人工 reference
+时不报告 CER/DER/JER。完整结果与口径见 `docs/t061_chinese_all40_engineering.md`。
+
 日常复跑推荐直接使用总控脚本：
 
 ```powershell
