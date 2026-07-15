@@ -43,6 +43,18 @@ datasets:
       - "自行运行 ASR 构建 noisy transcript、置信度和医生交互样本"
     local_path: null
 
+  remote_programming_40:
+    enabled: false
+    access: "受保护真实临床研究数据；仅按已批准范围使用，不提交 Git"
+    language: "中文为主，可能含中英混说"
+    modality: ["audio", "automatic_transcript", "automatic_case_summary"]
+    recommended_use:
+      - "Parakeet Hybrid 中文 ASR、置信度和 n-best 工程验证"
+      - "医学实体优先审阅、反馈回放和下游鲁棒性研究"
+    local_path: null
+    manifest_path: null
+    model_path: null
+
   fareez_osce:
     enabled: false
     access: "公开医患 OSCE 访谈，使用前检查许可"

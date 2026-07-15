@@ -30,10 +30,11 @@ from clinical_asr_robustness.asr_confidence import (
     SourceChannel,
     UncertainSpan,
     confidence_level_for_score,
+    join_asr_words,
 )
 
 DEFAULT_ALIGNMENT_NOTES = (
-    "ASR words are anchored to asr_transcript.split(); extra NeMo timestamp/confidence "
+    "ASR units are anchored to transcript text/character offsets; extra NeMo timestamp/confidence "
     "items are recorded in dropped_extra_* instead of creating synthetic words."
 )
 
@@ -99,7 +100,10 @@ def configure_ctc_greedy_confidence(
 
     from omegaconf import OmegaConf, open_dict
 
-    decoding_cfg = copy.deepcopy(model.cfg.decoding)
+    hybrid_ctc = hasattr(model, "ctc_decoding") and hasattr(model.cfg, "aux_ctc")
+    decoding_cfg = copy.deepcopy(
+        model.cfg.aux_ctc.decoding if hybrid_ctc else model.cfg.decoding
+    )
     method_cfg: dict[str, Any] = {"name": method_name}
     if method_name == "entropy":
         method_cfg.update(
@@ -130,8 +134,13 @@ def configure_ctc_greedy_confidence(
             },
         )
 
-    model.change_decoding_strategy(decoding_cfg, verbose=False)
-    return json.loads(json.dumps(OmegaConf.to_container(decoding_cfg, resolve=True)))
+    if hybrid_ctc:
+        model.change_decoding_strategy(decoding_cfg, decoder_type="ctc", verbose=False)
+    else:
+        model.change_decoding_strategy(decoding_cfg, verbose=False)
+    result = json.loads(json.dumps(OmegaConf.to_container(decoding_cfg, resolve=True)))
+    result["project_decoder_type"] = "hybrid_aux_ctc" if hybrid_ctc else "ctc"
+    return result
 
 
 def aggregate_confidences(values: Iterable[Any], method: str = "mean") -> float | None:
@@ -214,10 +223,19 @@ def build_asr_confidence_record(
         transcript=transcript,
         hypothesis=hypothesis,
         thresholds=thresholds,
+        text_unit_mode=str(manifest_record.get("text_unit_mode") or "whitespace"),
         word_confidences_override=word_confidences_override,
         word_confidence_source=word_confidence_source,
         word_confidence_metadata_by_index=word_confidence_metadata_by_index,
     )
+    source_start_sec = _float_or_none(manifest_record.get("source_start_sec"))
+    timestamp_offset_sec = source_start_sec or 0.0
+    if timestamp_offset_sec:
+        for word in asr_words:
+            if word.start_sec is not None:
+                word.start_sec += timestamp_offset_sec
+            if word.end_sec is not None:
+                word.end_sec += timestamp_offset_sec
     asr_confidence = aggregate_confidences(
         (word.confidence for word in asr_words),
         method="mean",
@@ -260,11 +278,41 @@ def build_asr_confidence_record(
         },
         "source_manifest": {
             "sample_id": sample_id,
+            "parent_sample_id": manifest_record.get("parent_sample_id"),
+            "unit_id": manifest_record.get("unit_id"),
             "consultation_sample_id": manifest_record.get("consultation_sample_id"),
+            "asr_input_audio_filepath": (
+                manifest_record.get("audio_filepath")
+                or manifest_record.get("audio_path")
+            ),
+            "source_audio_filepath": manifest_record.get("source_audio_filepath"),
+            "source_audio_sha256": manifest_record.get("source_audio_sha256"),
+            "source_duration_sec": _float_or_none(
+                manifest_record.get("source_duration_sec")
+            ),
+            "source_start_sec": source_start_sec,
+            "source_end_sec": _float_or_none(manifest_record.get("source_end_sec")),
+            "timestamp_reference": (
+                "source_audio_absolute"
+                if manifest_record.get("source_audio_filepath")
+                else "asr_input_audio_relative"
+            ),
+            "timestamp_offset_sec": timestamp_offset_sec,
             "text_is_placeholder": manifest_record.get("text_is_placeholder"),
             "reference_text_included": manifest_record.get("reference_text_included", False),
         },
     }
+
+    review_audio_filepath = (
+        manifest_record.get("source_audio_filepath")
+        or manifest_record.get("audio_filepath")
+        or manifest_record.get("audio_path")
+    )
+    review_duration_sec = _float_or_none(manifest_record.get("source_duration_sec"))
+    if review_duration_sec is None:
+        review_duration_sec = _float_or_none(
+            manifest_record.get("duration", manifest_record.get("duration_sec"))
+        )
 
     return ASRConfidenceRecord(
         record_id=f"{record_id_prefix}_{_safe_id(sample_id)}",
@@ -273,10 +321,8 @@ def build_asr_confidence_record(
         split=manifest_record.get("split"),
         consultation_id=manifest_record.get("consultation_id"),
         source_channel=source_channel,
-        audio_filepath=manifest_record.get("audio_filepath") or manifest_record.get("audio_path"),
-        duration_sec=_float_or_none(
-            manifest_record.get("duration", manifest_record.get("duration_sec"))
-        ),
+        audio_filepath=review_audio_filepath,
+        duration_sec=review_duration_sec,
         reference_textgrid_path=manifest_record.get("reference_textgrid_path"),
         reference_transcript_path=manifest_record.get("reference_transcript_path"),
         reference_text_included=bool(manifest_record.get("reference_text_included", False)),
@@ -304,13 +350,17 @@ def build_words_and_alignment(
     word_confidences_override: Iterable[Any] | None = None,
     word_confidence_source: str | None = None,
     word_confidence_metadata_by_index: list[dict[str, Any]] | None = None,
+    text_unit_mode: str = "whitespace",
 ) -> tuple[list[ASRWord], AlignmentDiagnostics]:
-    """按 T027 规则以 transcript words 为锚点对齐 timestamp/confidence。"""
+    """以 transcript 文本单元为锚点对齐 timestamp/confidence。"""
 
     active_thresholds = thresholds or ConfidenceThresholds()
-    words = transcript.split()
-    char_offsets = _word_char_offsets(transcript, words)
     word_timestamps = _timestamp_items(hypothesis, "word")
+    words, char_offsets, active_text_unit_mode = _transcript_units_and_offsets(
+        transcript,
+        word_timestamps=word_timestamps,
+        mode=text_unit_mode,
+    )
     if word_confidences_override is None:
         word_confidences = _sequence_to_list(getattr(hypothesis, "word_confidence", None))
         active_confidence_source = word_confidence_source or "nemo.word_confidence"
@@ -336,6 +386,12 @@ def build_words_and_alignment(
             else None
         )
         char_start, char_end = char_offsets[index]
+        previous_char_end = char_offsets[index - 1][1] if index > 0 else 0
+        separator_before = (
+            transcript[previous_char_end:char_start]
+            if previous_char_end is not None and char_start is not None
+            else None
+        )
 
         if start_sec is None or end_sec is None:
             missing_timestamp_indices.append(index)
@@ -360,6 +416,11 @@ def build_words_and_alignment(
                 char_end=char_end,
                 metadata={
                     **_word_metadata(timestamp),
+                    **(
+                        {"separator_before": separator_before}
+                        if separator_before is not None
+                        else {}
+                    ),
                     **(
                         metadata_by_index[index]
                         if index < len(metadata_by_index)
@@ -402,9 +463,28 @@ def build_words_and_alignment(
             "timestamp_source": "nemo.timestamp.word",
             "confidence_source": active_confidence_source,
             "confidence_override_used": word_confidences_override is not None,
+            "text_unit_mode_requested": text_unit_mode,
+            "text_unit_mode_active": active_text_unit_mode,
+            "language_agnostic_char_offsets": True,
         },
     )
     return asr_words, alignment
+
+
+def transcript_units_for_hypothesis(
+    transcript: str,
+    hypothesis: Any,
+    *,
+    mode: str = "whitespace",
+) -> list[str]:
+    """返回与 schema adapter 相同的语言感知文本单元，供 CTC 聚合复用。"""
+
+    units, _, _ = _transcript_units_and_offsets(
+        transcript,
+        word_timestamps=_timestamp_items(hypothesis, "word"),
+        mode=mode,
+    )
+    return units
 
 
 def build_segments_from_words(
@@ -443,7 +523,7 @@ def build_segments_from_words(
             segments.append(
                 ASRSegment(
                     segment_id=f"seg_{len(segments) + 1:03d}",
-                    text=" ".join(word.text for word in segment_words),
+                    text=join_asr_words(segment_words),
                     start_word_index=start_index,
                     end_word_index=index,
                     start_sec=start_sec,
@@ -484,7 +564,7 @@ def build_uncertain_spans_from_words(
         spans.append(
             UncertainSpan(
                 span_id=f"span_{len(spans) + 1:03d}",
-                text=" ".join(word.text for word in span_words),
+                text=join_asr_words(span_words),
                 start_word_index=start_index,
                 end_word_index=end_index,
                 start_sec=start_sec,
@@ -495,6 +575,7 @@ def build_uncertain_spans_from_words(
                     min_confidence=min_confidence,
                     mean_confidence=mean_confidence,
                     thresholds=thresholds,
+                    words=span_words,
                 ),
                 trigger_reason=_span_trigger_reason(span_words),
                 metadata={"word_count": len(span_words)},
@@ -511,6 +592,148 @@ def build_uncertain_spans_from_words(
             close_span(index)
     close_span(len(words))
     return spans
+
+
+def reclassify_confidence_record(
+    record: ASRConfidenceRecord,
+    thresholds: ConfidenceThresholds,
+) -> ASRConfidenceRecord:
+    """不重跑 ASR，按新阈值重算 record/word/segment/span 风险等级。
+
+    该函数面向尚未附加 n-best 候选的 T028 原始记录。阈值改变会重建
+    ``uncertain_spans``；若记录已有绑定旧 span id 的候选，直接拒绝处理，避免
+    候选与新 span 边界静默错位。
+    """
+
+    if record.asr_alternatives:
+        raise ValueError("已有 asr_alternatives 的记录不能直接重分级；请从 T028 原始记录重跑")
+
+    updated = record.model_copy(deep=True)
+    previous_thresholds = updated.confidence.thresholds.model_dump(mode="json")
+    updated.confidence.thresholds = thresholds.model_copy(deep=True)
+    updated.confidence_level = confidence_level_for_score(
+        updated.asr_confidence,
+        thresholds,
+    )
+    for word in updated.asr_words:
+        word.confidence_level = confidence_level_for_score(word.confidence, thresholds)
+    for segment in updated.asr_segments:
+        segment.confidence_level = confidence_level_for_score(segment.confidence, thresholds)
+    updated.uncertain_spans = build_uncertain_spans_from_words(
+        updated.asr_words,
+        thresholds=thresholds,
+    )
+    updated.metadata["confidence_threshold_reclassification"] = {
+        "previous_thresholds": previous_thresholds,
+        "active_thresholds": thresholds.model_dump(mode="json"),
+        "method": "offline_threshold_reclassification_without_asr_rerun",
+        "calibration_scope": "PriMock57 + NeMo native word_confidence research operating point",
+        "clinical_calibration": False,
+    }
+    return ASRConfidenceRecord.model_validate(updated.model_dump(mode="json"))
+
+
+def apply_demo_quantile_risk_levels(
+    records: Iterable[ASRConfidenceRecord],
+    *,
+    red_fraction: float = 0.10,
+    yellow_fraction: float = 0.20,
+) -> list[ASRConfidenceRecord]:
+    """按当前运行的 confidence 排名生成未校准 demo 绿/黄/红等级。"""
+
+    if red_fraction <= 0 or yellow_fraction <= 0:
+        raise ValueError("demo quantile 的 red/yellow fraction 必须大于 0")
+    if red_fraction + yellow_fraction >= 1:
+        raise ValueError("demo quantile 的 red + yellow fraction 必须小于 1")
+    output = [record.model_copy(deep=True) for record in records]
+    ranked = sorted(
+        (
+            (float(word.confidence), record_index, word.word_index)
+            for record_index, record in enumerate(output)
+            for word in record.asr_words
+            if word.confidence is not None and math.isfinite(float(word.confidence))
+        ),
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    if not ranked:
+        return output
+
+    red_count = min(len(ranked), max(1, math.ceil(len(ranked) * red_fraction)))
+    yellow_count = min(
+        len(ranked) - red_count,
+        max(1, math.ceil(len(ranked) * yellow_fraction)),
+    )
+    for rank, (_, record_index, word_index) in enumerate(ranked):
+        if rank < red_count:
+            level = ConfidenceLevel.RED
+        elif rank < red_count + yellow_count:
+            level = ConfidenceLevel.YELLOW
+        else:
+            level = ConfidenceLevel.GREEN
+        output[record_index].asr_words[word_index].confidence_level = level
+
+    sorted_values = [item[0] for item in ranked]
+    yellow_cut = sorted_values[min(red_count, len(sorted_values) - 1)]
+    green_cut = sorted_values[
+        min(red_count + yellow_count, len(sorted_values) - 1)
+    ]
+    if green_cut <= yellow_cut:
+        if green_cut < 1.0:
+            green_cut = math.nextafter(green_cut, 1.0)
+        else:
+            yellow_cut = math.nextafter(yellow_cut, 0.0)
+    thresholds = ConfidenceThresholds(
+        green_min=green_cut,
+        yellow_min=yellow_cut,
+    )
+
+    policy_metadata = {
+        "policy": "demo_quantile_v0",
+        "calibrated": False,
+        "scope": "selected_records_in_current_run",
+        "red_fraction_requested": red_fraction,
+        "yellow_fraction_requested": yellow_fraction,
+        "valid_unit_count": len(ranked),
+        "red_unit_count": red_count,
+        "yellow_unit_count": yellow_count,
+        "green_unit_count": len(ranked) - red_count - yellow_count,
+        "rank_assignment": "confidence_ascending_then_record_and_unit_index",
+        "quantile_cut_values": {
+            "yellow_boundary": sorted_values[min(red_count, len(sorted_values) - 1)],
+            "green_boundary": sorted_values[
+                min(red_count + yellow_count, len(sorted_values) - 1)
+            ],
+        },
+    }
+    for record in output:
+        record.confidence.thresholds = thresholds.model_copy(deep=True)
+        record.confidence.metadata["risk_level_policy"] = policy_metadata
+        record.confidence_level = confidence_level_for_score(
+            record.asr_confidence,
+            thresholds,
+        )
+        for segment in record.asr_segments:
+            segment_words = record.asr_words[
+                segment.start_word_index : segment.end_word_index
+            ]
+            levels = {word.confidence_level for word in segment_words}
+            if ConfidenceLevel.RED in levels:
+                segment.confidence_level = ConfidenceLevel.RED
+            elif ConfidenceLevel.YELLOW in levels:
+                segment.confidence_level = ConfidenceLevel.YELLOW
+            elif ConfidenceLevel.UNKNOWN in levels:
+                segment.confidence_level = ConfidenceLevel.UNKNOWN
+            else:
+                segment.confidence_level = ConfidenceLevel.GREEN
+        record.uncertain_spans = build_uncertain_spans_from_words(
+            record.asr_words,
+            thresholds=thresholds,
+        )
+        record.metadata["risk_level_policy"] = policy_metadata
+    return [
+        ASRConfidenceRecord.model_validate(record.model_dump(mode="json"))
+        for record in output
+    ]
 
 
 def _coerce_model_info(value: ASRModelInfo | dict[str, Any]) -> ASRModelInfo:
@@ -640,6 +863,65 @@ def _word_metadata(timestamp: Any) -> dict[str, Any]:
     return {"nemo_timestamp_word": to_jsonable(raw_word)}
 
 
+def _timestamp_word_text(timestamp: Any) -> str | None:
+    if isinstance(timestamp, dict):
+        raw_word = timestamp.get("word")
+    else:
+        raw_word = getattr(timestamp, "word", None)
+    if raw_word is None:
+        return None
+    text = str(raw_word).strip().lstrip("▁")
+    return text or None
+
+
+def _transcript_units_and_offsets(
+    transcript: str,
+    *,
+    word_timestamps: list[Any],
+    mode: str,
+) -> tuple[list[str], list[tuple[int | None, int | None]], str]:
+    supported_modes = {"auto", "whitespace", "timestamp", "character"}
+    if mode not in supported_modes:
+        raise ValueError(
+            f"不支持的 text_unit_mode：{mode}；可选 {sorted(supported_modes)}"
+        )
+
+    whitespace_units = transcript.split()
+    timestamp_units = [
+        text for item in word_timestamps if (text := _timestamp_word_text(item)) is not None
+    ]
+    timestamp_offsets = _word_char_offsets(transcript, timestamp_units)
+    timestamp_aligned = bool(timestamp_units) and all(
+        start is not None and end is not None for start, end in timestamp_offsets
+    )
+
+    active_mode = mode
+    if mode == "auto":
+        if len(whitespace_units) > 1:
+            active_mode = "whitespace"
+        elif len(timestamp_units) > 1 and timestamp_aligned:
+            active_mode = "timestamp"
+        elif any("\u3400" <= char <= "\u9fff" for char in transcript):
+            active_mode = "character"
+        else:
+            active_mode = "whitespace"
+
+    if active_mode == "whitespace":
+        return whitespace_units, _word_char_offsets(transcript, whitespace_units), active_mode
+    if active_mode == "timestamp":
+        if not timestamp_aligned:
+            raise ValueError("timestamp text units 无法顺序对齐到 asr_transcript")
+        return timestamp_units, timestamp_offsets, active_mode
+
+    character_units = [char for char in transcript if not char.isspace()]
+    character_offsets = [
+        (index, index + 1)
+        for index, char in enumerate(transcript)
+        if not char.isspace()
+    ]
+    return character_units, character_offsets, "character"
+
+
 def _word_char_offsets(text: str, words: list[str]) -> list[tuple[int | None, int | None]]:
     offsets: list[tuple[int | None, int | None]] = []
     search_from = 0
@@ -671,7 +953,16 @@ def _span_confidence_level(
     min_confidence: float | None,
     mean_confidence: float | None,
     thresholds: ConfidenceThresholds | None,
+    words: list[ASRWord] | None = None,
 ) -> ConfidenceLevel:
+    if words:
+        levels = {word.confidence_level for word in words}
+        if ConfidenceLevel.RED in levels:
+            return ConfidenceLevel.RED
+        if ConfidenceLevel.YELLOW in levels:
+            return ConfidenceLevel.YELLOW
+        if ConfidenceLevel.UNKNOWN in levels:
+            return ConfidenceLevel.UNKNOWN
     level = confidence_level_for_score(
         min_confidence if min_confidence is not None else mean_confidence,
         thresholds,

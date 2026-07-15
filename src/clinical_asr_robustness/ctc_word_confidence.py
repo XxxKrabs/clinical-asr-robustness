@@ -71,6 +71,7 @@ def compute_ctc_word_confidence(
     score_type: str,
     blank_id: int,
     transcript: str,
+    transcript_units: Sequence[str] | None = None,
     token_texts_by_id: Mapping[int, str] | Sequence[str] | None = None,
     method_name: str = "entropy",
     entropy_type: str = "tsallis",
@@ -86,7 +87,9 @@ def compute_ctc_word_confidence(
             或 posterior。
         score_type: `logits`、`log_probs` 或 `posterior`。
         blank_id: CTC blank token id。
-        transcript: ASR 输出文本；仅用 `split()` 后的 word 数作为锚点。
+        transcript: ASR 输出文本。
+        transcript_units: 可选的稳定文本单元（英文词、中文词/字或 subword）；
+            未提供时保持历史行为，使用 `transcript.split()`。
         token_texts_by_id: 可选 token id → token string 映射。FastConformer-CTC
             BPE 通常使用 SentencePiece 的 `▁` 作为词边界；有该映射时可把
             CTC token span 聚合到 word。
@@ -116,7 +119,9 @@ def compute_ctc_word_confidence(
         token_texts_by_id=token_texts_by_id,
         aggregation=token_aggregation,
     )
-    transcript_words = transcript.split()
+    transcript_words = (
+        list(transcript_units) if transcript_units is not None else transcript.split()
+    )
     word_token_spans = derive_word_token_spans(
         transcript_words=transcript_words,
         token_texts=[span.token_text for span in token_spans],
@@ -139,6 +144,11 @@ def compute_ctc_word_confidence(
         "token_aggregation": token_aggregation,
         "word_aggregation": word_aggregation,
         "transcript_word_count": len(transcript_words),
+        "transcript_unit_source": (
+            "explicit_language_aware_units"
+            if transcript_units is not None
+            else "legacy_whitespace_split"
+        ),
         "emitted_token_count": len(token_spans),
         "word_alignment_status": (
             "aligned"
@@ -333,6 +343,13 @@ def derive_word_token_spans(
     if not token_texts:
         return [None] * word_count
 
+    surface_spans = _derive_unit_token_spans_by_surface(
+        transcript_units=transcript_words,
+        token_texts=token_texts,
+    )
+    if surface_spans is not None:
+        return surface_spans
+
     boundaries: list[int] = [0]
     for index, token_text in enumerate(token_texts):
         if index == 0:
@@ -352,6 +369,48 @@ def derive_word_token_spans(
     if len(token_texts) == word_count:
         return [(index, index + 1) for index in range(word_count)]
     return [None] * word_count
+
+
+def _normalized_token_surface(text: str | None) -> str:
+    value = str(text or "").lstrip("▁Ġ")
+    return "".join(char for char in value if not char.isspace()).casefold()
+
+
+def _derive_unit_token_spans_by_surface(
+    *,
+    transcript_units: Sequence[str],
+    token_texts: Sequence[str | None],
+) -> list[tuple[int, int] | None] | None:
+    """按无空格 surface 字符区间对齐 unit↔BPE token，允许一个 token 覆盖多个中文字。"""
+
+    unit_surfaces = [_normalized_token_surface(unit) for unit in transcript_units]
+    token_surfaces = [_normalized_token_surface(token) for token in token_texts]
+    if not unit_surfaces or not token_surfaces or any(not value for value in unit_surfaces):
+        return None
+    if "".join(unit_surfaces) != "".join(token_surfaces):
+        return None
+
+    token_ranges: list[tuple[int, int]] = []
+    cursor = 0
+    for token_surface in token_surfaces:
+        token_ranges.append((cursor, cursor + len(token_surface)))
+        cursor += len(token_surface)
+
+    output: list[tuple[int, int] | None] = []
+    unit_cursor = 0
+    for unit_surface in unit_surfaces:
+        unit_start = unit_cursor
+        unit_end = unit_cursor + len(unit_surface)
+        overlapped = [
+            token_index
+            for token_index, (token_start, token_end) in enumerate(token_ranges)
+            if unit_start < token_end and token_start < unit_end
+        ]
+        output.append(
+            (min(overlapped), max(overlapped) + 1) if overlapped else None
+        )
+        unit_cursor = unit_end
+    return output
 
 
 def aggregate_token_confidence_to_words(

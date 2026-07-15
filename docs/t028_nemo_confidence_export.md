@@ -71,13 +71,30 @@ T028 初版曾沿用 NeMo 默认 `entropy_norm=exp`，但在 PriMock57
 支持的 `lin` 归一化后，词级均值约 0.912，适合当前交互 demo。`exp` 仍可通过
 `--entropy-norm exp` 复现并作为消融。
 
-默认颜色阈值沿用 T027：
+当前 PriMock57/NeMo 主线默认颜色阈值为：
 
-- green：`confidence >= 0.80`
-- yellow：`0.50 <= confidence < 0.80`
-- red：`confidence < 0.50`
+- green：`confidence >= 0.90`
+- yellow：`0.80 <= confidence < 0.90`
+- red：`confidence < 0.80`
 
 可用 `--green-min`、`--yellow-min` 调整。
+
+早期阈值 0.80/0.50 在全量 75,597 个词上得到 71,569 green、4,028 yellow、
+0 red，原因是实际最小 confidence 约 0.5268。新阈值 0.90/0.80 在不重跑 ASR
+时预计得到 51,710 green、19,859 yellow、4,028 red；3 条 reference 对齐样本的
+三档错误率为 7.78% / 24.84% / 47.85%，风险梯度单调。该选择只作为当前
+PriMock57 + NeMo 原生 `word_confidence` 的研究性操作点，不代表临床校准。
+
+已有 T028 原始 JSONL 可离线重分级，无需重新运行 NeMo：
+
+```bash
+/home/krabs/miniforge3/envs/clinical-asr/bin/python \
+  scripts/reclassify_asr_confidence_thresholds.py
+```
+
+脚本会保留旧文件，生成 `primock57_asr_confidence_full_three_level.jsonl`，并重算
+record/word/segment 等级与 `uncertain_spans`。为避免候选错绑，它拒绝处理已附加
+`asr_alternatives` 的记录；T029/T038 及后续候选、医生反馈实验应从新 T028 文件重跑。
 
 
 ## T043 词级 CTC frame-derived confidence 扩展
@@ -140,6 +157,6 @@ T028 初版曾沿用 NeMo 默认 `entropy_norm=exp`，但在 PriMock57
 结构化结果摘要：
 
 - run summary：`status == "ok"`，`records_written == 2`，未内联 reference 正文，外部 `Speech-main` 路径为空；
-- confidence distribution：1145 个 word confidence，1031 green、114 yellow、0 red；均值约 0.884，`low_scale_warning=false`；
+- 当时使用旧阈值 0.80/0.50：1145 个 word confidence，1031 green、114 yellow、0 red；均值约 0.884，`low_scale_warning=false`；
 - `primock57:day1_consultation01:doctor`：738 个 ASR words、19 个 derived segments、67 个 yellow uncertain spans，word timestamps/confidence 均为 738；
 - `primock57:day1_consultation01:patient`：407 个 ASR words、11 个 derived segments、7 个 yellow uncertain spans，word timestamps 408、word confidence 407，记录 dropped extra timestamp 1。

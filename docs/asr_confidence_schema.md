@@ -66,9 +66,15 @@
 
 默认颜色阈值：
 
-- 绿：`confidence >= 0.80`
-- 黄：`0.50 <= confidence < 0.80`
-- 红：`confidence < 0.50`
+- 绿：`confidence >= 0.90`
+- 黄：`0.80 <= confidence < 0.90`
+- 红：`confidence < 0.80`
+
+上述默认值自 2026-07-13 起用于当前 PriMock57 + NeMo 原生
+`word_confidence` 主线。它是根据本地分数分布和 3 条 reference 对齐校准样本选择的
+研究性操作点：校准样本中绿/黄/红错误率依次为 7.78% / 24.84% / 47.85%，
+全量 75,597 词预计占比约 68.4% / 26.3% / 5.3%。这不是临床级校准结论，
+更换 ASR 模型、confidence 方法或数据域后必须重新评估阈值。
 - 缺失：`unknown`
 
 ## 片段与待审阅 span
@@ -136,8 +142,8 @@ preserve_word_confidence: true
 exclude_blank: true
 source_field: word_confidence
 thresholds:
-  green_min: 0.80
-  yellow_min: 0.50
+  green_min: 0.90
+  yellow_min: 0.80
 ```
 
 说明：T028 初版曾沿用 NeMo 默认 `entropy_norm=exp`，但在 PriMock57

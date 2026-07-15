@@ -57,7 +57,10 @@ def configure_ctc_beam_nbest(
 
     from omegaconf import OmegaConf, open_dict
 
-    decoding_cfg = copy.deepcopy(model.cfg.decoding)
+    hybrid_ctc = hasattr(model, "ctc_decoding") and hasattr(model.cfg, "aux_ctc")
+    decoding_cfg = copy.deepcopy(
+        model.cfg.aux_ctc.decoding if hybrid_ctc else model.cfg.decoding
+    )
     with open_dict(decoding_cfg):
         decoding_cfg.strategy = strategy
         decoding_cfg.compute_timestamps = False
@@ -83,8 +86,13 @@ def configure_ctc_beam_nbest(
             confidence_cfg.preserve_token_confidence = False
             confidence_cfg.preserve_word_confidence = False
 
-    model.change_decoding_strategy(decoding_cfg, verbose=False)
-    return to_jsonable(OmegaConf.to_container(decoding_cfg, resolve=True))
+    if hybrid_ctc:
+        model.change_decoding_strategy(decoding_cfg, decoder_type="ctc", verbose=False)
+    else:
+        model.change_decoding_strategy(decoding_cfg, verbose=False)
+    result = to_jsonable(OmegaConf.to_container(decoding_cfg, resolve=True))
+    result["project_decoder_type"] = "hybrid_aux_ctc" if hybrid_ctc else "ctc"
+    return result
 
 
 def flatten_nbest_transcription_results(transcription_result: Any) -> list[list[Any]]:
@@ -184,6 +192,16 @@ def build_nbest_jsonl_record(
     sample_id = str(manifest_record.get("sample_id") or "unknown_sample")
     candidates = extract_beam_candidates(hypothesis_group, max_beams=max_beams)
     generated_at = generated_at_utc or datetime.now(timezone.utc)
+    review_audio_filepath = (
+        manifest_record.get("source_audio_filepath")
+        or manifest_record.get("audio_filepath")
+        or manifest_record.get("audio_path")
+    )
+    review_duration_sec = manifest_record.get("source_duration_sec")
+    if review_duration_sec is None:
+        review_duration_sec = manifest_record.get(
+            "duration", manifest_record.get("duration_sec")
+        )
     return {
         "schema_version": NBEST_SCHEMA_VERSION,
         "record_id": f"{record_id_prefix}_{safe_id(sample_id)}",
@@ -192,10 +210,8 @@ def build_nbest_jsonl_record(
         "split": manifest_record.get("split"),
         "consultation_id": manifest_record.get("consultation_id"),
         "source_channel": manifest_record.get("source_channel"),
-        "audio_filepath": (
-            manifest_record.get("audio_filepath") or manifest_record.get("audio_path")
-        ),
-        "duration_sec": manifest_record.get("duration", manifest_record.get("duration_sec")),
+        "audio_filepath": review_audio_filepath,
+        "duration_sec": review_duration_sec,
         "source": source,
         "generated_at_utc": generated_at.isoformat(),
         "beams": [
@@ -221,6 +237,24 @@ def build_nbest_jsonl_record(
             "decoding": decoding_config or {},
             "runtime": runtime or {},
             "beam_count": len(candidates),
+            "source_manifest": {
+                "parent_sample_id": manifest_record.get("parent_sample_id"),
+                "unit_id": manifest_record.get("unit_id"),
+                "asr_input_audio_filepath": (
+                    manifest_record.get("audio_filepath")
+                    or manifest_record.get("audio_path")
+                ),
+                "source_audio_filepath": manifest_record.get("source_audio_filepath"),
+                "source_audio_sha256": manifest_record.get("source_audio_sha256"),
+                "source_duration_sec": manifest_record.get("source_duration_sec"),
+                "source_start_sec": manifest_record.get("source_start_sec"),
+                "source_end_sec": manifest_record.get("source_end_sec"),
+                "timestamp_reference": (
+                    "source_audio_absolute"
+                    if manifest_record.get("source_audio_filepath")
+                    else "asr_input_audio_relative"
+                ),
+            },
             "no_inline_reference_text": not bool(
                 manifest_record.get("reference_text_included", False)
             ),

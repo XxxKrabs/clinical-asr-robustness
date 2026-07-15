@@ -16,17 +16,21 @@ from clinical_asr_robustness.asr_confidence import (
     SourceChannel,
     UncertainSpan,
 )
+from clinical_asr_robustness.nemo_confidence_export import build_asr_confidence_record
 from clinical_asr_robustness.review_workflow import (
     ConfirmationStatus,
     DoctorFeedbackEntry,
     DoctorFeedbackLog,
     ReviewFeedbackAction,
     apply_feedback_to_record,
+    build_review_conversations,
     build_review_html,
     build_review_sample,
     read_feedback_entries_jsonl,
+    read_review_conversations_jsonl,
     read_review_samples_jsonl,
     write_feedback_entries_jsonl,
+    write_review_conversations_jsonl,
     write_review_samples_jsonl,
     write_review_spans_csv,
 )
@@ -156,6 +160,51 @@ def test_build_review_sample_and_export_jsonl_csv(tmp_path) -> None:
     assert "reports chest pain" in rows[0]["candidate_texts"]
 
 
+def test_review_conversation_groups_windows_and_splits_speaker_turns(tmp_path) -> None:
+    first_payload = make_review_record().model_dump(mode="json")
+    for index, word in enumerate(first_payload["asr_words"]):
+        word["speaker_label"] = "spk_0" if index < 2 else "spk_1"
+    first = ASRConfidenceRecord.model_validate(first_payload)
+
+    second_payload = make_review_record().model_dump(mode="json")
+    second_payload["record_id"] = "nemo_entropy_primock57_demo_patient_2"
+    second_payload["sample_id"] = "primock57:demo:patient:0002"
+    for word in second_payload["asr_words"]:
+        word["start_sec"] += 1.4
+        word["end_sec"] += 1.4
+        word["speaker_label"] = "spk_1"
+    for segment in second_payload["asr_segments"]:
+        segment["start_sec"] += 1.4
+        segment["end_sec"] += 1.4
+        segment["speaker_label"] = "spk_1"
+    second = ASRConfidenceRecord.model_validate(second_payload)
+
+    conversations = build_review_conversations(
+        [build_review_sample(first), build_review_sample(second)]
+    )
+
+    assert len(conversations) == 1
+    conversation = conversations[0]
+    assert conversation.consultation_id == "demo"
+    assert conversation.sample_ids == [
+        "primock57:demo:patient",
+        "primock57:demo:patient:0002",
+    ]
+    assert conversation.diarization_status == "complete"
+    assert [turn.speaker_label for turn in conversation.speaker_turns] == [
+        "spk_0",
+        "spk_1",
+    ]
+    assert len(conversation.speaker_turns[1].slices) == 2
+    assert "[spk_0]" in conversation.conversation_transcript
+
+    output = tmp_path / "review_conversations.jsonl"
+    write_review_conversations_jsonl(conversations, output)
+    loaded = read_review_conversations_jsonl(output)
+    assert loaded[0].conversation_id == "primock57:demo:conversation"
+    assert len(loaded[0].review_samples) == 2
+
+
 def test_apply_feedback_select_alternative_generates_confirmed_transcript() -> None:
     record = make_review_record()
     feedback = DoctorFeedbackEntry(
@@ -233,6 +282,41 @@ def test_apply_feedback_manual_edit_and_reject_policies() -> None:
     assert rejected.unresolved_span_ids == ["span_001"]
 
 
+def test_chinese_feedback_replay_uses_character_offsets_without_inserting_spaces() -> None:
+    class ChineseHypothesis:
+        text = "患者咳嗽"
+        timestamp = {
+            "word": [
+                {"word": text, "start": index * 0.2, "end": (index + 1) * 0.2}
+                for index, text in enumerate("患者咳嗽")
+            ]
+        }
+        word_confidence = [0.96, 0.95, 0.42, 0.40]
+
+    record = build_asr_confidence_record(
+        manifest_record={
+            "sample_id": "remote_programming_40:case_demo:mixed",
+            "dataset": "remote_programming_40",
+            "source_channel": "mixed",
+            "text_unit_mode": "auto",
+        },
+        hypothesis=ChineseHypothesis(),
+        model_info={"model_name": "fake_hybrid_zh"},
+        decoding_config={"strategy": "greedy"},
+    )
+    feedback = DoctorFeedbackEntry(
+        record_id=record.record_id,
+        span_id=record.uncertain_spans[0].span_id,
+        action=ReviewFeedbackAction.MANUAL_EDIT,
+        manual_text="头晕",
+    )
+
+    confirmed = apply_feedback_to_record(record, [feedback])
+
+    assert confirmed.confirmed_transcript == "患者头晕"
+    assert " " not in confirmed.confirmed_transcript
+
+
 def test_feedback_jsonl_accepts_entry_and_log_wrapper(tmp_path) -> None:
     entry = DoctorFeedbackEntry(
         record_id="record-1",
@@ -268,11 +352,38 @@ def test_feedback_jsonl_accepts_utf8_bom(tmp_path) -> None:
     assert entries[0].action == ReviewFeedbackAction.ACCEPT_ASR
 
 
-def test_build_review_html_contains_interactive_feedback_export() -> None:
+def test_build_review_html_contains_audio_and_mutually_exclusive_decisions(
+    tmp_path,
+) -> None:
     sample = build_review_sample(make_review_record())
-    html = build_review_html([sample], title="T036 ASR demo", interactive=True)
+    html = build_review_html(
+        [sample],
+        title="T036 ASR demo",
+        interactive=True,
+        html_output_path=tmp_path / "outputs/review.html",
+        project_root=tmp_path,
+    )
 
     assert "T036" in html
     assert "select_alternative" in html
     assert "doctor_feedback_log.jsonl" in html
     assert "reports chest pain" in html
+    assert 'id="conversation-trigger"' in html
+    assert 'id="conversation-list"' in html
+    assert "setActiveSample" in html
+    assert "groupSamplesByConversation" in html
+    assert 'class="conversation-turns"' in html
+    assert "完整对话" in html
+    assert "speakerIdentity" in html
+    assert "position: sticky" in html
+    assert "保存并下一个" in html
+    assert 'id="review-audio"' in html
+    assert 'class="audio-cue-button"' in html
+    assert 'id="play-span-audio"' in html
+    assert "playAudioClip" in html
+    assert "../data/external/primock57/audio/demo_patient.wav" in html
+    assert 'name="decision"' in html
+    assert 'data-decision-action="select_alternative"' in html
+    assert 'name="candidate"' not in html
+    assert 'name="action"' not in html
+    assert "audio_play_count" in html

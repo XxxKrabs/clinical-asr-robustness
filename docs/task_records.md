@@ -792,7 +792,7 @@ wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python s
 
 ## 2026-07-09：T043 CTC posterior/entropy 词级置信度流水线
 
-新增 CTC frame logits/log_probs/posterior 到 word-level confidence 的项目侧流水线：src/clinical_asr_robustness/ctc_word_confidence.py 支持 entropy/max-prob frame confidence、CTC token collapse、BPE word 聚合和 .npz frame artifact 读写；T028 导出脚本新增 --word-confidence-source ctc_frame_distribution、--save-frame-distributions、--frame-distribution-kind log_probs|posterior，可把 sr_words[].confidence 改为 frame-derived word confidence，并在 metadata 中标明来源。新增 	ests/test_ctc_word_confidence.py 和 docs/t043_ctc_word_confidence.md；验证目标 pytest 9 passed、targeted ruff 通过。局限：尚未对真实 PriMock57 音频复跑，下一步检查 token→word 对齐、artifact 体积和医学实体待审 span 变化。
+新增 CTC frame logits/log_probs/posterior 到 word-level confidence 的项目侧流水线：src/clinical_asr_robustness/ctc_word_confidence.py 支持 entropy/max-prob frame confidence、CTC token collapse、BPE word 聚合和 .npz frame artifact 读写；T028 导出脚本新增 --word-confidence-source ctc_frame_distribution、--save-frame-distributions、--frame-distribution-kind log_probs|posterior，可把 `asr_words[].confidence` 改为 frame-derived word confidence，并在 metadata 中标明来源。新增 tests/test_ctc_word_confidence.py 和 docs/t043_ctc_word_confidence.md；验证目标 pytest 9 passed、targeted ruff 通过。局限：尚未对真实 PriMock57 音频复跑，下一步检查 token→word 对齐、artifact 体积和医学实体待审 span 变化。
 
 ## 2026-07-09：T044 黄/红词级 LLM 候选逻辑
 
@@ -827,3 +827,1392 @@ wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python s
 - 本轮没有真实调用外部 LLM 生成大样本候选；真实调用仍需项目 `.env` 或环境变量提供 API 配置，且不得把 key 写入代码、文档或输出摘要。
 - LLM 候选是 ASR 审阅辅助，不是 ASR 原生 n-best/top-k，也不代表医学正确答案；后续仍需人工检查候选正确性、延迟、医生选择/编辑/拒绝成本，并继续保留 `manual_edit`、`reject`、`unable_to_judge`。
 - T038 医学实体 gating 的误报/过宽 span 仍会影响哪些词进入 T044 候选生成，后续需要和实体后处理一起评估。
+
+## 2026-07-09：T042 病例摘要质量评估方案归档
+
+背景：原 `docs/todo.md` 中保留了较长的 T042 方案，导致 TODO 入口过长。本轮将方案归档到任务记录，TODO 中只保留一行下一步。
+
+目标：判断 T041 生成摘要是否真正保留病例信息，而不是只看语言是否通顺。V0 评估以 reference transcript 或人工 key facts 为 gold，对 noisy ASR、confirmed transcript、reference transcript 三类输入分别生成摘要，比较质量差异和 confirmed transcript 带来的收益。
+
+推荐指标：
+
+- 结构合规：JSON 可解析率、必需字段存在率、字段类型正确率、是否只输出研究用摘要。
+- 字段级信息保持：按 `chief_complaint`、`history_of_present_illness`、`symptoms`、`negated_or_absent_symptoms`、`relevant_history`、`medications`、`tests_or_exam_mentioned`、`assessment_mentioned`、`plan_mentioned` 建 gold key facts，计算 precision / recall / F1；重点单列症状、否定症状、药物、检查、assessment、plan。
+- 事实一致性：把摘要拆成 atomic claims，标注 supported / unsupported / contradicted / unclear，报告 unsupported fact rate、contradiction rate、hallucination count per case。
+- 临床高风险错误：单列否定词错误、药名/剂量/用法错误、诊疗计划越界、说话人归因错误、把不确定检查或诊断写实等；报告 safety-critical error count。
+- 鲁棒性收益：比较 `score_confirmed - score_noisy`、`score_reference - score_noisy`，可用 gap closure = `(confirmed - noisy) / (reference - noisy)`；若当前 confirmed 仍是 simulated accept_asr，预期收益应接近 0。
+- 不确定性质量：检查 `uncertainty_notes` 是否覆盖 ASR 噪声、低置信 span 和含糊医学术语；统计应标未标/误标不确定性。
+- 人工审核成本：记录每条摘要需修改字段数、人工编辑字数、审核时间、严重错误数；用于评估医生/研究者确认后的下游收益是否值得。
+
+V0 评测流程：
+
+1. 从 T041 records 抽取 `case_summary`，不把完整 transcript 写入公开文档。
+2. 基于 clean/reference transcript 人工建立每个 consultation 的 gold key facts 表；字段包括症状、否定症状、药物/治疗、检查、诊断倾向、计划、相关病史/社会史。
+3. 将生成摘要拆成 atomic claims，人工或 LLM-assisted 初标后人工复核：supported / unsupported / contradicted / unclear，并标严重程度 minor/major/safety-critical。
+4. 先对当前 2 条 noisy ASR 摘要做人工 pilot，重点核查已发现的疑点：`止泻药` 是否为计划越界，`皮肤检查显示皮疹` 是否把不确定检查写实。
+5. 生成 confirmed/reference 两套摘要后复跑同一评测，输出 summary JSON/CSV：字段级 P/R/F1、unsupported/contradicted facts、关键错误类型、审核成本和 robustness gain。
+6. 扩展到更多 PriMock57 样本后，至少双人标注一小批，报告一致性；最终论文中同时报告自动指标和人工 error taxonomy。
+
+阶段验收标准：先完成 2 条样本的 gold key facts 与人工审核表；实现 `scripts/evaluate_case_summaries.py` 后输出可复跑的 `outputs/primock57/t042_case_summary_evaluation/` 报告。V0 不把 ROUGE/BLEU 作为主指标，只可作为附录参考。
+
+## 2026-07-09：再次精简 `docs/todo.md`
+
+背景：`docs/todo.md` 再次累积了较多历史说明、任务展开和完成记录，已经不适合作为新对话的快速入口。
+
+本轮整理：
+
+- 保留快速规则、环境速记、当前主线、当前焦点、阻塞/风险、最近完成和专项文档入口。
+- 将 T039/T043/T044 的展开说明从 TODO 中移除，详细实现继续以专项文档和 `docs/task_records.md` 为准。
+- 将 T042 病例摘要质量评估方案归档到本文件，TODO 中只保留下一步验收口径。
+- 最近完成只保留 5 条；更早记录统一指向 `docs/task_records.md`。
+
+## 2026-07-09：T042a gold key facts schema 与校验入口
+
+背景：T042 已选择方案 B，即以 gold key facts + source-aware factuality 为主评估层，常规 ROUGE-L / BERTScore 只作为辅助。`docs/todo.md` 中 T042 的下一步是先定义 `gold_key_facts.jsonl`，为后续 raw ASR / confirmed / reference 三类摘要对齐评估提供稳定 gold 层。
+
+本轮实现：
+
+- 新增 `src/clinical_asr_robustness/case_summary_evaluation.py`：
+  - 定义 `GoldKeyFact`、`EvidencePointer`、`CaseSummaryFactField`、`GoldFactPolarity`、`GoldFactSeverity` 和 `SummaryHighRiskTag`；
+  - `gold_key_facts.jsonl` 核心字段包括 `fact_id`、`bundle_id`、`field`、`canonical_fact`、`polarity`、`severity`、`source_channel`、`evidence_pointer`、`error_tags`；
+  - `evidence_pointer` 禁止 `contains_full_transcript_text=true`，并只允许短 `cue`、word/time index、sample/record 等定位信息；
+  - `negated_or_absent_symptoms` 强制 `polarity="absent"`，避免否定事实后续评估混乱；
+  - 提供 JSONL 读写、重复 `fact_id` 检查、variant-neutral `build_gold_bundle_id()` 和不含 `canonical_fact` 正文的聚合 summary。
+- 新增 `scripts/validate_gold_key_facts.py`：
+  - 默认读取 `data/processed/primock57/t042_case_summary_evaluation/gold_key_facts.jsonl`；
+  - 输出 `outputs/primock57/t042_case_summary_evaluation/primock57_t042_gold_key_facts_summary.json`；
+  - run config 记录输入输出、fact/bundle 数和隐私约束，不记录完整 transcript。
+- 新增 `configs/gold_key_facts.example.jsonl` 合成示例；真实标注仍应放在 `data/processed/`，不提交 Git。
+- 新增 `docs/t042_case_summary_quality_evaluation.md`，说明 schema 字段、允许值、证据指针规范、校验命令和后续 T042b/T042d 接法。
+- 新增 `tests/test_case_summary_evaluation.py`，覆盖合法 round-trip、summary 不泄露 fact 正文、重复 `fact_id` 拒绝、证据指针隐私检查、否定症状 polarity 约束和高风险标签计数。
+
+验证：
+
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_case_summary_evaluation.py --basetemp=.pytest_tmp`：6 passed。
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check src/clinical_asr_robustness/case_summary_evaluation.py scripts/validate_gold_key_facts.py tests/test_case_summary_evaluation.py`：All checks passed。
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/validate_gold_key_facts.py --input-jsonl configs/gold_key_facts.example.jsonl --output-dir outputs/primock57/t042_case_summary_evaluation_example`：成功生成合成示例 summary，`summary_contains_canonical_fact_text=false`。
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest --basetemp=.pytest_tmp`：68 passed。
+
+隐私与边界：
+
+- `gold_key_facts.jsonl` 会包含短的 `canonical_fact` 标签，真实标注文件仍应视作研究数据，默认不提交 Git。
+- 聚合 summary、run config 和文档示例不得包含真实未脱敏病例正文、完整 transcript、prompt 或 API key。
+- 当前只完成 T042a schema/校验，不等于已经评估 T041 摘要质量。
+
+下一步：
+
+- T042b：扩展/复用 T041，为 raw ASR / confirmed transcript / reference oracle 生成同一 schema 的 consultation-level 病例摘要，并记录 `input_variant`、模型、prompt 版本和研究用途声明。
+- T042d：在 gold facts 基础上实现 source-aware 事实级评估 B-lite，计算 fact precision / recall / F1、critical fact recall、unsupported / contradicted / unverifiable 和 omission count。
+
+## 2026-07-09：T042b 三类输入摘要生成对齐
+
+背景：T042a 已定义 gold key facts schema；`docs/todo.md` 中 T042 的下一步是复用 T041，为 noisy/raw ASR、confirmed transcript 和 reference oracle 生成同一 schema 的 consultation-level 病例摘要任务记录，作为后续 source-aware factuality 评估输入。
+
+本轮实现：
+
+- 扩展 `src/clinical_asr_robustness/case_summary_generation.py`：
+  - 新增 `input_variant` 支持：`noisy_asr`、`confirmed_transcript`、`reference_oracle`，并兼容 `raw_asr` 作为 `noisy_asr` alias；
+  - confirmed variant 读取 T035 `confirmed_transcript_record/v1`，reference variant 通过 ASR record 的 reference 指针读取 clean/reference transcript；
+  - 三类输入复用同一 `CaseSummary` schema、同一 consultation-level bundle 逻辑和同一 LLM 调用路径；
+  - prompt 升级为 `case_summary_prompt/v2_input_variant_aware`，在 prompt metadata 中记录 `input_variant` 和 `prompt_version`；
+  - records 中记录 `input_variant`、`prompt_version`、`model`、`research_use_only` 和 `clinical_use_warning`；
+  - 聚合 summary 新增 `input_variant_counts`、`status_counts_by_input_variant`、`source_record_counts_by_input_variant` 和 `skipped_records`，仍不写入 transcript/prompt 正文。
+- 扩展 `scripts/generate_case_summaries.py`：
+  - 新增 `--input-variants` 和 `--confirmed-input-jsonl`；
+  - 默认仍只生成 noisy ASR，T042b 可显式指定三类输入；
+  - run config 记录 input variants、confirmed 输入路径和隐私校验信息。
+- 扩展 `tests/test_case_summary_generation.py`：
+  - 覆盖 input-variant-aware prompt；
+  - 覆盖 noisy ASR / confirmed / reference 三类输入 dry-run 对齐、summary 不泄露 reference 正文。
+- 更新 `docs/t041_case_summary_generation.md`、`docs/t042_case_summary_quality_evaluation.md` 和 `docs/todo.md`。
+
+T042b dry-run 命令：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/generate_case_summaries.py `
+  --input-variants noisy_asr confirmed_transcript reference_oracle `
+  --output-dir outputs/primock57/t042_case_summary_variant_generation `
+  --records-name primock57_t042_case_summary_variant_records.jsonl `
+  --summary-name primock57_t042_case_summary_variant_summary.json `
+  --run-config-name t042_case_summary_variant_generation_run.json
+```
+
+输出：
+
+- `outputs/primock57/t042_case_summary_variant_generation/primock57_t042_case_summary_variant_records.jsonl`
+- `outputs/primock57/t042_case_summary_variant_generation/primock57_t042_case_summary_variant_summary.json`
+- `outputs/primock57/t042_case_summary_variant_generation/t042_case_summary_variant_generation_run.json`
+
+dry-run 结果：
+
+- input units：6；
+- group_by：`consultation`；
+- input variants：`noisy_asr: 2`、`confirmed_transcript: 2`、`reference_oracle: 2`；
+- source records：每个 variant 3 条，合计 9 条；
+- status：`prompt_ready: 6`；
+- records_skipped：0；
+- prompt_version：`case_summary_prompt/v2_input_variant_aware`；
+- `summary_contains_full_transcript_text=false`。
+
+注意：当前 confirmed 输入仍是 simulated `accept_asr`，仅用于验证链路，不代表真实医生确认收益。`records.jsonl` 包含完整 transcript 和 prompt，默认只保存在 `outputs/`，不提交 Git；summary/run config 不含完整 transcript、prompt 或 API key。
+
+验证：
+
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_case_summary_generation.py --basetemp=.pytest_tmp`：7 passed；
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check src/clinical_asr_robustness/case_summary_generation.py scripts/generate_case_summaries.py tests/test_case_summary_generation.py`：All checks passed；
+- 上述 T042b dry-run 命令成功生成 6 条 prompt-ready 任务记录。
+
+下一步：
+
+- T042c：接入 ROUGE-L 辅助指标，只作为横向看板，不替代事实级评价。
+- T042d：在 T042a gold facts 基础上实现 source-aware 事实级评估 B-lite，计算 fact precision / recall / F1、critical fact recall、unsupported / contradicted / unverifiable 和 omission count。
+
+## 2026-07-09：T042c/T042d ROUGE-L 辅助层与 source-aware B-lite 事实评估
+
+背景：T042a 已提供 `gold_key_facts.jsonl` schema，T042b 已生成 noisy ASR / confirmed transcript / reference oracle 三类 input_variant 的 consultation-level 摘要任务 records。当前缺口是：在真实或人工生成的 `case_summary` 存在后，能够复跑一个不泄露完整 transcript 的摘要质量评估入口。
+
+本轮实现：
+
+- 扩展 `src/clinical_asr_robustness/case_summary_evaluation.py`：
+  - 新增轻量 `rouge_l_score()`，不依赖外部 ROUGE 包；英文/数字按词，中文按 CJK 字符 token，用于 T042c 辅助指标；
+  - 新增 `ExtractedSummaryFact`、`SummaryFactFactuality`、`SummaryFactPolarity`；
+  - 从 T041 `case_summary` 的结构化字段抽取短 summary facts，不读取或输出完整 transcript；
+  - 对每条 summary fact 做 source-aware B-lite 匹配：ROUGE-L / normalized term coverage + 极性启发式，标注 `supported` / `unsupported` / `contradicted` / `unverifiable`；
+  - 按 record 计算 fact precision / recall / F1、critical fact recall、omission count、ROUGE-L against gold facts 和 high-risk error tag counts；
+  - 聚合 summary 按 input_variant 汇总 micro/macro 指标，默认不包含 `canonical_fact`、summary fact 文本、完整 transcript 或 prompt。
+- 新增 `scripts/evaluate_case_summaries.py`：
+  - 默认读取 T042b records：`outputs/primock57/t042_case_summary_variant_generation/primock57_t042_case_summary_variant_records.jsonl`；
+  - 默认读取真实 gold：`data/processed/primock57/t042_case_summary_evaluation/gold_key_facts.jsonl`；
+  - 默认输出：
+    - `outputs/primock57/t042_case_summary_evaluation/primock57_t042_case_summary_quality_records.jsonl`
+    - `outputs/primock57/t042_case_summary_evaluation/primock57_t042_case_summary_fact_evaluations.jsonl`
+    - `outputs/primock57/t042_case_summary_evaluation/primock57_t042_case_summary_quality_summary.json`
+    - `outputs/primock57/t042_case_summary_evaluation/t042_case_summary_quality_evaluation_run.json`
+  - 默认 `fact_evaluations.jsonl` 不写 `summary_fact_text`；如需人工复核可显式加 `--include-fact-text`，但该输出应按受控研究数据处理。
+- 扩展 `tests/test_case_summary_evaluation.py`：
+  - 覆盖 mixed Chinese/English ROUGE-L；
+  - 覆盖 supported + unsupported + critical recall + omission 的 happy path；
+  - 覆盖否定极性冲突判为 `contradicted`；
+  - 覆盖 dry-run `prompt_ready` / missing `case_summary` 时跳过评估。
+- 更新 `docs/t042_case_summary_quality_evaluation.md`、`scripts/README.md` 和 `docs/todo.md`。
+
+评估命令：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/evaluate_case_summaries.py `
+  --summary-records-jsonl outputs/primock57/t042_case_summary_variant_generation/primock57_t042_case_summary_variant_records.jsonl `
+  --gold-key-facts-jsonl data/processed/primock57/t042_case_summary_evaluation/gold_key_facts.jsonl
+```
+
+当前没有强行运行默认真实评估，因为 `data/processed/primock57/t042_case_summary_evaluation/gold_key_facts.jsonl` 尚未存在；用合成 gold 去评估真实 T042b records 会产生误导性 skipped/unverifiable 输出。`scripts/evaluate_case_summaries.py --help` 已确认入口可加载。
+
+验证：
+
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_case_summary_evaluation.py --basetemp=.pytest_tmp`：10 passed。
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_case_summary_evaluation.py tests/test_case_summary_generation.py --basetemp=.pytest_tmp`：17 passed。
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check src/clinical_asr_robustness/case_summary_evaluation.py scripts/evaluate_case_summaries.py tests/test_case_summary_evaluation.py`：All checks passed。
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/evaluate_case_summaries.py --help`：成功加载 CLI。
+
+隐私与边界：
+
+- 聚合 `quality_summary.json` 不包含 fact 正文、完整 transcript 或 prompt。
+- `quality_records.jsonl` 只记录指标、计数、omitted gold fact id，不包含 fact 正文。
+- `fact_evaluations.jsonl` 默认只写 summary fact hash、字段、匹配分数和 best gold fact id；显式 `--include-fact-text` 后才写生成摘要事实短标签。
+- B-lite 是确定性词面/术语匹配和极性启发式，不替代人工临床事实核查；论文或报告结论应以人工抽样复核后的事实级评价为准。
+
+下一步：
+
+- 准备真实/人工 `gold_key_facts.jsonl`，并对 T041/T042b records 加 `--run-llm` 或人工写入 `case_summary` 后复跑 T042c/T042d。
+- T042e：统计否定词/极性翻转、药名/剂量、检查/计划、说话人归属等 high-risk errors，并检查 `uncertainty_notes` 是否覆盖低置信或证据不足事实。
+- T042f：把错误或被修复的 summary facts 回连到 ASR `green/yellow/red` span 和审阅反馈成本，区分 ASR-induced 与 model hallucination。
+
+## 2026-07-09：T042e 高风险错误类型与不确定性说明覆盖评估
+
+背景：T042c/T042d 已能对生成病例摘要做 ROUGE-L 辅助指标和 source-aware B-lite 事实级评估，但 `docs/todo.md` 中 T042e 仍缺少两类关键输出：一是把 unsupported / contradicted / unverifiable / omission 进一步归入否定极性、药名剂量、检查计划、说话人归属等高风险错误族；二是检查 noisy ASR 输入下模型是否在 `uncertainty_notes` 中说明低置信或证据不足风险。
+
+本轮实现：
+
+- 扩展 `src/clinical_asr_robustness/case_summary_evaluation.py`：
+  - 新增 `CASE_SUMMARY_QUALITY_SUBTASKS`，将评估入口标记为 T042c/T042d/T042e；
+  - 在 fact-level evaluation 中新增 `is_high_risk_error` 和 `high_risk_error_types`，默认仍不写 summary fact 正文；
+  - 在 record-level quality record 中新增 `high_risk_error_type_counts`，按 summary field、gold fact tag/severity 和 omitted gold fact 统计风险族；
+  - 新增 `uncertainty_note_evaluation`，对 `case_summary.uncertainty_notes` 只输出 note 数量、类别计数、覆盖状态和缺失原因，不输出 note 正文；
+  - 支持 `coverage_status`：`not_required`、`missing`、`generic_note_present`、`covered_by_category`；
+  - 聚合 summary 新增 `uncertainty_note_summary`，统计 required/missing record count、loose/category 覆盖率、expected/missing reason counts 和 note category counts。
+- 扩展 `scripts/evaluate_case_summaries.py`：
+  - 运行记录 `t042_subtasks` 加入 `T042e_high_risk_error_and_uncertainty_notes`；
+  - CLI 成功输出中新增 uncertainty notes required/missing 摘要。
+- 扩展 `tests/test_case_summary_evaluation.py`：
+  - 覆盖药名/剂量、否定极性冲突和 noisy ASR 低置信风险均被 `uncertainty_notes` 类别覆盖；
+  - 覆盖 noisy ASR 有 `uncertain_span_count` 但无 `uncertainty_notes` 时标记 missing；
+  - 继续验证 fact/summary 聚合输出不泄露 summary fact 正文或 uncertainty note 正文。
+- 更新 `docs/t042_case_summary_quality_evaluation.md`、`scripts/README.md` 和 `docs/todo.md`。
+
+当前 T042e 输出重点：
+
+- `high_risk_error_type_counts`：包括 `negation_or_polarity`、`drug_name`、`medication_dose_or_route`、`test_or_exam`、`plan_or_follow_up`、`speaker_attribution`、`assessment_or_diagnosis`、`medical_term`、`safety_critical_fact` 及其 omitted 前缀计数；
+- `uncertainty_note_summary`：包括是否需要 notes、缺失记录数、宽松覆盖率、类别覆盖率、预期原因计数和缺失原因计数；
+- `uncertainty_note_evaluation.expected_uncertainty_reasons`：记录低置信 ASR span、unsupported/contradicted/unverifiable fact、omitted safety-critical/high-risk gold fact 等原因。
+
+验证：
+
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_case_summary_evaluation.py --basetemp=.pytest_tmp`：12 passed。
+
+隐私与边界：
+
+- 聚合 summary 和 quality records 不包含完整 transcript、prompt、summary fact 正文或 uncertainty note 正文。
+- 当前 T042e 是确定性启发式风险分类和 notes 覆盖检查；它能用于自动看板和抽样优先级，不替代人工临床事实核查。
+- 真实质量结论仍需等待真实/人工 `case_summary` 与真实 `gold_key_facts.jsonl` 复跑。
+
+下一步：
+
+- 复跑完整测试与 ruff；
+- T042f：将错误或被修复的 summary facts 回连到 ASR evidence span / green-yellow-red confidence / review feedback 成本，区分 ASR-induced 与 model hallucination。
+
+## 2026-07-09：T042f ASR 置信度归因与审阅成本收益
+
+背景：T042a–T042e 已建立 gold key facts、三类 input_variant 摘要生成、ROUGE-L 辅助指标、source-aware B-lite 事实级评估、高风险错误统计和 uncertainty notes 覆盖检查。剩余缺口是：把摘要事实错误或遗漏回连到 ASR 输出层证据，观察错误是否与低置信词、待审阅医学实体 span、manual edit / select alternative 等审阅动作相关，并比较 confirmed transcript 摘要相对 noisy ASR 摘要的质量收益。
+
+本轮实现：
+
+- 扩展 `src/clinical_asr_robustness/case_summary_evaluation.py`：
+  - `run_case_summary_quality_evaluation()` 新增可选 `asr_confidence_jsonl` 与 `confirmed_transcripts_jsonl`；
+  - 读取 ASR confidence records 后，按 `source_record_ids` / `source_sample_ids` / `dataset + consultation_id` 回连 T041/T042b summary record；
+  - 使用 gold fact 的 `evidence_pointer` 回连 ASR record，优先按 `record_id` / `sample_id` / `source_channel` 匹配；词范围按 `[word_start_index, word_end_index)` 连接到 `asr_words`，越界或缺失时尝试时间重叠；
+  - fact-level `confidence_attribution` 输出 evidence 所在 ASR 词颜色计数、dominant risk level、重叠 `uncertain_spans`、T035 review action counts、changed/manual/select span 计数；
+  - fact-level `summary_error_attribution` 启发式区分 `asr_induced_possible`、`review_modified_evidence_span`、`summary_generation_polarity_error_possible`、`model_hallucination_possible` 等；
+  - record-level 新增 `confidence_attribution` 和 `review_cost_attribution`；
+  - summary-level 新增 `confidence_attribution_summary`、`review_cost_attribution_summary`、`review_benefit_summary`；
+  - review cost 聚合按 source record 去重，避免同一 ASR source 因 noisy/confirmed/reference 多个 variant 被重复计费。
+- 扩展 `scripts/evaluate_case_summaries.py`：
+  - 新增 `--asr-confidence-jsonl` 和 `--confirmed-transcripts-jsonl`；
+  - 运行记录和 CLI 摘要输出 T042f 状态、confidence attribution status 和 paired consultation count。
+- 扩展 `tests/test_case_summary_evaluation.py`：
+  - 构造合成 ASR 低置信红色 span：`pain` 被识别为 `pian`；
+  - 构造 T035 `manual_edit` confirmed transcript；
+  - 验证 noisy 摘要 fact F1 从 0 提升到 confirmed 摘要 1，review benefit 可按 manual edit 归因；
+  - 验证 fact evidence 被回连到 red review span 和 `manual_edit` 成本；
+  - 继续验证 summary 不包含完整 transcript、summary fact 正文或 confirmed span 正文。
+- 更新 `docs/t042_case_summary_quality_evaluation.md`、`scripts/README.md` 和 `docs/todo.md`。
+
+当前 T042f 输出重点：
+
+- `fact_evaluations.jsonl[].confidence_attribution`：record/sample/span id、颜色计数、cue hash、review action counts；
+- `fact_evaluations.jsonl[].summary_error_attribution`：ASR-induced / hallucination / polarity 等启发式来源；
+- `quality_records.jsonl[].confidence_attribution`：本 record 的 evidence 颜色分布、omission attribution 和 overlap review span 计数；
+- `quality_records.jsonl[].review_cost_attribution`：source record、review span、applied/resolved/changed span、action summary；
+- `quality_summary.json.review_benefit_summary`：noisy ASR vs confirmed transcript 摘要 fact F1 / recall / critical recall 改善、omission reduction、fact error reduction，以及 per review span / changed span / manual edit 收益。
+
+验证：
+
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_case_summary_evaluation.py --basetemp=.pytest_tmp`：13 passed。
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check src/clinical_asr_robustness/case_summary_evaluation.py scripts/evaluate_case_summaries.py tests/test_case_summary_evaluation.py`：All checks passed。
+- `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_case_summary_evaluation.py tests/test_case_summary_generation.py --basetemp=.pytest_tmp`：20 passed。
+
+隐私与边界：
+
+- 默认 fact-level 输出仍不写 `summary_fact_text`；T042f 只新增 fact hash、best gold id、evidence pointer 位置、cue hash、record/sample/span id 和计数。
+- 聚合 summary 不包含完整 transcript、prompt、gold canonical fact 正文、summary fact 正文、uncertainty note 正文或 confirmed span 正文。
+- ASR-induced / model hallucination 是启发式自动归因，不替代人工复核；低置信或待审 span 只能说明“可能由 ASR 噪声传播”，不能单独作为最终错误来源结论。
+
+下一步：
+
+- 在真实/人工 `case_summary` 与真实 `gold_key_facts.jsonl` 上复跑 T042c–T042f；
+- 用真实研究者/医生反馈替换 simulated `accept_asr` confirmed transcript，再比较 review benefit；
+- 推进 T042g：对自动事实评估与 ASR 归因结果抽样人工复核，记录 disagreement、失败案例和典型 ASR 噪声传播链，并生成不含完整 transcript 正文的报告。
+
+## 2026-07-10：PriMock57 全量 ASR noisy transcript 新集
+
+背景：此前 PriMock57 只对少量 2–3 路音频跑过 ASR noisy transcript。为了后续医学实体审阅、confirmed transcript 与下游评测，需要对 `data/external/primock57/` 的 57 条 consultation / 114 路 doctor-patient channel 全量生成 ASR noisy transcript、词级时间戳和置信度，并整理为可直接作为后续输入的新集。
+
+本轮实现：
+
+- 生成全量 PriMock57 manifest：
+  - 输入数据根目录：`data/external/primock57/`
+  - 输出目录：`data/interim/primock57/manifests_full/`
+  - split：`primock57_full_asr_v0`
+  - 结果：57 条 consultation / 114 路 channel，总 channel 音频时长 62171.46 秒，reference / notes 正文未写入 manifest。
+- 扩展 `scripts/export_nemo_asr_confidence.py`：
+  - 新增 `--audio-window-sec` 与 `--audio-window-temp-dir`；
+  - 长音频按固定长度临时切窗后逐窗转写，再把词级 `start_sec` / `end_sec` 平移回原始音频时间轴；
+  - 合并窗口级 words 后重建 `asr_segments`、`uncertain_spans`、alignment diagnostics 和 windowing metadata；
+  - 每次 transcribe 后主动 `torch.cuda.empty_cache()` / `gc.collect()`，降低长任务显存累积风险；
+  - 当前 windowed 路径只支持 NeMo 原生 `word_confidence`，暂不与 T043 `ctc_frame_distribution` / frame artifact 同时运行。
+- 新增 `scripts/run_primock57_asr_confidence_chunks.py`：
+  - 将 114 路 channel manifest 切成 chunk，逐 chunk 调用 T028；
+  - 支持 `--resume`、chunk 输出校验、最终按 manifest 顺序合并；
+  - 本轮使用 chunk size 8，共 15 个 chunk。
+- 新增 `scripts/build_primock57_noisy_transcript_dataset.py`：
+  - 从 T028 channel-level ASR confidence JSONL 整理 channel 级 noisy transcript 新集；
+  - 合并同一 consultation 的 doctor/patient ASR segments，按时间排序生成 consultation 级 `speaker_turns` 与带说话人标签的 `noisy_transcript`；
+  - summary 只写路径、计数、置信度分布和校验结果，不写 transcript、reference 或 notes 正文。
+
+关键运行命令：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/build_primock57_asr_manifest.py `
+  --limit 57 `
+  --split primock57_full_asr_v0 `
+  --output-dir data/interim/primock57/manifests_full
+
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/run_primock57_asr_confidence_chunks.py `
+  --chunk-size 8 `
+  --resume `
+  --audio-window-sec 120 `
+  --chunks-dir outputs/primock57/t028_nemo_asr_confidence/full_window120_chunks `
+  --run-summary-json outputs/primock57/t028_nemo_asr_confidence/t028_nemo_asr_confidence_full_window120_chunked_run.json
+
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/build_primock57_noisy_transcript_dataset.py `
+  --input-jsonl outputs/primock57/t028_nemo_asr_confidence/primock57_asr_confidence_full.jsonl `
+  --channel-output-jsonl data/processed/primock57/asr_noisy_transcripts_full/primock57_noisy_transcripts_channel.jsonl `
+  --consultation-output-jsonl data/processed/primock57/asr_noisy_transcripts_full/primock57_noisy_transcripts_consultation.jsonl `
+  --summary-json data/processed/primock57/asr_noisy_transcripts_full/primock57_noisy_transcripts_summary.json `
+  --dataset-version primock57_asr_noisy_transcripts_full_window120_v0
+```
+
+主要产物：
+
+- 全量 ASR confidence：
+  - `outputs/primock57/t028_nemo_asr_confidence/primock57_asr_confidence_full.jsonl`
+  - 114 条 channel record，约 42.8 MB；
+  - run summary：`outputs/primock57/t028_nemo_asr_confidence/t028_nemo_asr_confidence_full_window120_chunked_run.json`
+  - chunk 输出：`outputs/primock57/t028_nemo_asr_confidence/full_window120_chunks/`
+- noisy transcript 新集：
+  - channel 级：`data/processed/primock57/asr_noisy_transcripts_full/primock57_noisy_transcripts_channel.jsonl`
+  - consultation 级：`data/processed/primock57/asr_noisy_transcripts_full/primock57_noisy_transcripts_consultation.jsonl`
+  - summary：`data/processed/primock57/asr_noisy_transcripts_full/primock57_noisy_transcripts_summary.json`
+
+关键计数：
+
+- ASR confidence JSONL：114 records；57 consultations；doctor/patient 各 57；所有 records 均有 words；`reference_text_included=false`。
+- noisy transcript 新集：114 channel records；57 consultation records；所有 consultation 均有 doctor + patient 双通道。
+- 新集 summary：75597 ASR words，2095 ASR segments，2861 uncertain spans。
+- 词级置信度分布：green 71569，yellow 4028，当前阈值下 red 0；mean 0.912602，min 0.52682，p10 0.833451。
+
+验证：
+
+- T028 ASR schema 读取校验：
+  - 114 records；
+  - `all_have_words=True`；
+  - `no_inline_reference=True`；
+  - 57 consultations；
+  - channels：doctor / patient。
+- chunk runner 摘要：
+  - status：`ok`；
+  - chunk count：15；
+  - records written：114；
+  - sample order 与 manifest 一致。
+- noisy transcript summary：
+  - `no_inline_reference_text=true`；
+  - `no_confirmed_transcript_yet=true`；
+  - `all_consultations_have_doctor_and_patient=true`；
+  - `summary_contains_no_transcript_text=true`。
+- 测试：
+  - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check scripts/export_nemo_asr_confidence.py scripts/run_primock57_asr_confidence_chunks.py scripts/build_primock57_noisy_transcript_dataset.py`：All checks passed。
+  - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m py_compile scripts/export_nemo_asr_confidence.py scripts/run_primock57_asr_confidence_chunks.py scripts/build_primock57_noisy_transcript_dataset.py`：通过。
+  - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_asr_confidence_schema.py tests/test_nemo_confidence_export.py tests/test_primock57_asr_manifest.py --basetemp=.pytest_tmp`：10 passed。
+
+失败与修正记录：
+
+- 直接对 114 路整段音频连续运行 T028，在第 10/114 路附近触发 CUDA OOM；
+- chunk size 4 仍会因同一 Python/NeMo 进程内多条长音频显存累积而 OOM；
+- 最长单条 858 秒音频整段前向也会 OOM；
+- 采用 120 秒无重叠 audio windows 后，最长单条音频可成功转写并合并；全量 15 chunks 均成功。
+
+隐私与边界：
+
+- PriMock57 是模拟问诊数据，但本项目仍按研究数据处理；`data/processed/`、`outputs/` 和本地 PriMock57 派生 transcript 默认不提交 Git。
+- 本轮记录和 summary 不写完整 transcript、reference TextGrid 正文、notes 正文或 confirmed transcript 正文。
+- 当前全量基线使用 NeMo 原生 `word_confidence`，不是 T043 CTC posterior/entropy 全量结果。
+- 120 秒 windowed ASR 会在窗口边界损失跨窗口上下文；它是为规避 8GB GPU 长音频 OOM 的工程基线，后续报告应标注 `audio_window_sec=120`。
+
+下一步：
+
+- 以 `outputs/primock57/t028_nemo_asr_confidence/primock57_asr_confidence_full.jsonl` 为输入复跑 T038 医学实体 gating、T029 候选对齐、T030/T036 审阅样本与 HTML demo。
+- 用全量 noisy transcript 新集复跑 T031 ASR noisy/置信度初评，以及后续 T040 raw/confirmed/reference 下游评估。
+- 若需要 T043 CTC posterior 全量结果，应先为 windowed 长音频路径补齐/验证 `ctc_frame_distribution` 聚合与 artifact 保存策略，避免整段长音频 OOM 和 `.npz` 体积失控。
+
+## 2026-07-10：TODO 精简与 T045 全量三文本病例摘要评测拆解
+
+任务来源：用户提出下一阶段要用全量 `noisy transcript`、PriMock57 自带 `clean transcript`、以及“医生选择候选词后修正的 repair transcript”三种文本进入病例生成下游任务，并以三种文本的病例摘要评测结果作为验收。
+
+本轮处理：
+
+- 将 `docs/todo.md` 从较长的历史交接板精简为当前任务入口，只保留快速规则、当前目标、已确认资产、T045 分步 TODO、模型分工约束、风险和专项文档入口。
+- 将下一阶段主线命名为 `T045 全量三文本病例摘要评测`，拆为 9 个步骤：
+  1. 三文本样本对齐；
+  2. clean/reference 构建；
+  3. 全量候选生成；
+  4. 选择 LLM 扮演医生；
+  5. repair transcript 回放；
+  6. 三文本病例摘要生成；
+  7. 病例摘要评测；
+  8. 三组结果验收表；
+  9. 抽样人工复核。
+- 明确最终验收标准：同一批 57 条 consultation、同一病例摘要 prompt/schema、同一病例生成模型下，输出 `noisy_asr` / `clean_reference` / `doctor_llm_repair` 三组病例摘要评测结果和聚合对比表。
+- 明确模型隔离要求：选择 LLM（doctor selector）必须不同于病例摘要生成 LLM（case summary generator）；选择 LLM 不得读取 clean/reference、医生 notes、gold key facts、病例摘要输出或评测结果。
+- 在 TODO 中加入选择 LLM 的结构化提示词草案和输出 JSON schema，支持 `select_candidate`、`keep_asr`、`manual_edit`、`reject`、`unable_to_judge` 等动作。
+
+PriMock57 clean/reference 核对：
+
+- 本地存在 `data/external/primock57/transcripts/*.TextGrid`，共 114 个 doctor/patient TextGrid，对应 57 条 consultation。
+- `data/external/primock57/transcripts/README.md` 说明该目录包含每条音频的 manual utterance-level transcriptions，格式为 TextGrid。
+- 因此 PriMock57 自带 clean/reference transcript；项目中应将其作为 `clean_reference`，不能当作 noisy transcript。
+
+隐私与边界：
+
+- 本轮记录不写入任何完整 transcript、TextGrid 正文、notes 正文或病例摘要正文。
+- `doctor_llm_repair` 只能称为模拟医生选择结果，不等于真实医生确认。
+
+## 2026-07-10：T045 第 1 步三文本样本对齐
+
+任务来源：用户要求“完成 T045 的下一步”。根据 `docs/todo.md`，当前下一步是 P0-1“三文本样本对齐”。
+
+本轮处理：
+
+- 新增 `scripts/build_t045_three_text_alignment.py`，读取全量 consultation-level noisy ASR JSONL，核对 PriMock57 doctor/patient TextGrid clean/reference 文件，并可选读取后续的 `doctor_llm_repair` JSONL。
+- 新增 `tests/test_t045_three_text_alignment.py`，覆盖：
+  - repair JSONL 不存在时按 consultation 标记 `pending_generation`；
+  - 可选 repair JSONL 存在时只记录 ID、声道和记录数，不把 repair transcript 正文写入 manifest；
+  - alignment/summary 不写 noisy ASR 或 TextGrid reference 正文。
+- 新增专项文档 `docs/t045_case_summary_three_texts.md`，记录三文本定义、对齐产物、全量计数和下一步。
+- 更新 `docs/todo.md`：T045 当前下一步推进到 P0-2 `clean/reference` 构建。
+
+全量运行命令：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/build_t045_three_text_alignment.py
+```
+
+输出：
+
+```text
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_three_text_alignment.jsonl
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_three_text_alignment_summary.json
+```
+
+关键结果：
+
+- alignment records：57；
+- split：`primock57_full_asr_v0` 共 57；
+- noisy ASR available：57；
+- noisy doctor/patient 双声道完整：57；
+- clean TextGrid doctor/patient 成对完整：57；
+- `doctor_llm_repair` available：0；
+- `doctor_llm_repair` pending：57；
+- ready for clean/reference build：57；
+- ready for three-text summary generation：0；
+- TextGrid non-empty utterance intervals：7108；
+- `<UNSURE>` 标签计数：1132；
+- `<UNIN/>` 标签计数：1359。
+
+校验：
+
+- `all_noisy_consultations_have_doctor_patient_channels=true`；
+- `all_noisy_consultations_have_clean_textgrid_pair=true`；
+- `missing_clean_reference_consultation_ids=[]`；
+- `manifest_contains_full_transcript_text=false`；
+- `summary_contains_full_transcript_text=false`；
+- `reference_text_included=false`。
+
+验证命令：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest tests/test_t045_three_text_alignment.py --basetemp=.pytest_tmp
+```
+
+结果：`2 passed`。
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check scripts/build_t045_three_text_alignment.py tests/test_t045_three_text_alignment.py
+```
+
+结果：`All checks passed!`
+
+隐私与边界：
+
+- alignment JSONL 和 summary 只写路径、ID、声道、计数、状态和校验结果，不写完整 transcript 正文。
+- `doctor_llm_repair` 当前只是待生成的模拟医生选择产物；不能写成真实医生确认。
+- 下一步是 T045 P0-2：解析 TextGrid，按时间戳合并为 consultation-level `clean_reference` JSONL，并记录 `<UNSURE>` / `<UNIN/>` 的保留或归一化策略。
+
+## 2026-07-10：T045 全量三文本病例摘要离线验收
+
+任务来源：用户要求完成 T045，验收要求是得到最终病例摘要生成任务的评测结果表，有条件画成图。
+
+本轮处理：
+
+- 新增 `scripts/run_t045_case_summary_final_evaluation.py`，在没有外部 LLM/API、且全量 doctor selector 尚未完成时，先跑通 T045 的可复现离线验收闭环：
+  - 从 PriMock57 doctor/patient TextGrid 构建 57 条 consultation-level `clean_reference` JSONL；
+  - 明确 TextGrid 标签策略：`<UNSURE>` 去标签但保留内部文本，`<UNIN/>` 和其他 angle tag 移除；
+  - 生成 `doctor_llm_repair` no-change simulated baseline，明确不读取 clean/reference、不代表真实医生或 doctor selector 审阅；
+  - 使用同一 deterministic keyword case-summary baseline 为 `noisy_asr`、`doctor_llm_repair`、`clean_reference` 生成结构化病例摘要记录；
+  - 从 clean/reference 自动抽取短 gold key facts，并调用既有 T042 source-aware B-lite 评测链路；
+  - 输出最终 CSV/Markdown 结果表和 SVG 图。
+- 更新 `docs/t045_case_summary_three_texts.md`、`docs/todo.md`、`scripts/README.md`，记录运行命令、产物路径、指标和限制。
+
+运行命令：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/run_t045_case_summary_final_evaluation.py
+```
+
+核心输出：
+
+```text
+data/processed/primock57/t045_case_summary_three_texts/primock57_t045_clean_reference_consultation.jsonl
+data/processed/primock57/t045_case_summary_three_texts/primock57_t045_doctor_llm_repair_no_change_baseline.jsonl
+data/processed/primock57/t045_case_summary_three_texts/primock57_t045_gold_key_facts.keyword_baseline.jsonl
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_generation_records.jsonl
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_quality_records.jsonl
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_quality_summary.json
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.csv
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.md
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.svg
+outputs/primock57/t045_case_summary_three_texts/t045_case_summary_final_evaluation_run.json
+```
+
+关键结果：
+
+- consultation records：57；
+- clean reference records：57；
+- no-change repair baseline records：57；
+- case summary records：171；
+- 自动 gold key facts：516；
+- T042 quality evaluated records：171；
+- skipped records：0。
+
+最终聚合表：
+
+| 输入变体 | 样本数 | Precision | Recall | F1 | Critical recall | ROUGE-L F1 | Omission | Unsupported | Contradicted | Uncertainty 缺失 | F1 Δ vs noisy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `noisy_asr` | 57 | 0.939 | 0.834 | 0.876 | 0.833 | 0.804 | 87 | 20 | 10 | 57 | 0.000 |
+| `doctor_llm_repair` no-change baseline | 57 | 0.939 | 0.834 | 0.876 | 0.833 | 0.804 | 87 | 20 | 10 | 47 | 0.000 |
+| `clean_reference` oracle | 57 | 1.000 | 1.000 | 1.000 | 1.000 | 0.932 | 0 | 0 | 0 | 0 | 0.124 |
+
+验证：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check scripts/run_t045_case_summary_final_evaluation.py
+```
+
+结果：`All checks passed!`
+
+隐私与边界：
+
+- 最终表、SVG 图、run summary 和聚合 summary 不包含完整 transcript、prompt 或病例原文。
+- `data/processed/` 中的 clean/reference、repair baseline 和 gold facts JSONL 为本地研究数据，默认不提交 Git。
+- 本轮病例摘要生成是 deterministic keyword baseline，不是外部 LLM 真实病例摘要生成；gold facts 也是自动抽取，适合管线验收和相对比较，不替代人工临床事实核查。
+- 当前 `doctor_llm_repair` 是 no-change simulated baseline，因此相对 `noisy_asr` 的 F1 收益为 0；后续需用真实全量候选和独立 doctor selector feedback log 替换后复跑同一脚本。
+
+## 2026-07-10：T045 real doctor LLM selector / repair 替换 no-change baseline
+
+任务来源：用户要求实现真实 `doctor_llm_selector` / `doctor_llm_repair`，不能继续使用 no-change baseline；selector LLM 必须不同于病例摘要生成任务的 LLM；需要对每个风险 span 做选择、输出 repaired/confirmed transcript、保留每个 span 的审阅日志，并复跑 T045 `noisy_asr` vs real `doctor_llm_repair` vs `clean_reference` oracle 评测表和图。
+
+本轮处理：
+
+- 先用全量 T028 ASR confidence 复跑 T029 候选补齐：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/extract_asr_nbest_candidates.py `
+  --input-jsonl outputs/primock57/t028_nemo_asr_confidence/primock57_asr_confidence_full.jsonl `
+  --output-jsonl outputs/primock57/t029_asr_nbest_candidates/primock57_asr_confidence_full_medical_entity_candidates.jsonl `
+  --run-config-json outputs/primock57/t029_asr_nbest_candidates/t029_asr_nbest_candidates_full_run.json `
+  --llm-candidate-prompts-jsonl outputs/primock57/t029_asr_nbest_candidates/primock57_full_llm_word_candidate_prompts.jsonl
+```
+
+- 新增 `scripts/run_t045_doctor_llm_selector.py`：
+  - 读取全量 ASR confidence / risk spans；
+  - 组织 selector payload：`asr_span_text`、左右局部上下文、speaker、置信度、候选列表；
+  - 使用 `.env` 中配置的 OpenAI-compatible API 调用独立 selector LLM；
+  - 输出 `select_candidate` / `keep_asr` / `manual_edit` / `reject` / `unable_to_judge` 决策；
+  - 将决策转为 T035 `DoctorFeedbackEntry` 并回放到 channel-level confirmed transcript；
+  - 合并为 57 条 consultation-level real `doctor_llm_repair` JSONL；
+  - 支持续跑：每个 batch append decisions，失败后可继续跳过已完成 span。
+- 修改 `scripts/run_t045_case_summary_final_evaluation.py`：
+  - 新增 `--repair-jsonl` 参数，可直接传入 real repair JSONL 替换 no-change baseline；
+  - run summary、Markdown 表和 SVG 图记录 `doctor_llm_repair_mode=real_doctor_llm_selector`；
+  - final CSV 中为 repair 行补入 selector review action / changed span 成本。
+- 更新 `docs/todo.md`、`docs/t045_case_summary_three_texts.md`、`scripts/README.md`。
+
+selector 运行命令：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/run_t045_doctor_llm_selector.py
+```
+
+复跑 T045 评测命令：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/run_t045_case_summary_final_evaluation.py `
+  --repair-jsonl data/processed/primock57/t045_case_summary_three_texts/primock57_t045_doctor_llm_repair_real_selector.jsonl
+```
+
+selector 核心输出：
+
+```text
+outputs/primock57/t045_doctor_llm_selector/t045_doctor_llm_selector_run.json
+outputs/primock57/t045_doctor_llm_selector/primock57_t045_doctor_llm_decisions.jsonl
+outputs/primock57/t045_doctor_llm_selector/primock57_t045_doctor_llm_feedback.jsonl
+outputs/primock57/t045_doctor_llm_selector/primock57_t045_doctor_llm_confirmed_channel_transcripts.jsonl
+data/processed/primock57/t045_case_summary_three_texts/primock57_t045_doctor_llm_repair_real_selector.jsonl
+```
+
+selector 结果：
+
+- selector model：`Qwen3-Coder-Plus`；
+- 病例摘要生成模型：`deterministic_keyword_case_summary_baseline/v1`；
+- 两者不是同一个模型；
+- ASR records：114；
+- total risk spans：2861；
+- completed decisions：2861；
+- remaining decisions：0；
+- feedback entries：2861；
+- confirmed channel records：114；
+- consultation repair records：57；
+- `manual_edit=980`；
+- `keep_asr=1881`；
+- actually changed spans：833；
+- `selector_used_clean_reference=false`；
+- `selector_used_gold_facts=false`；
+- `selector_used_case_summary_outputs=false`。
+
+注意：本轮全量 T029 补齐后 `spans_with_candidates=0`，因为输入尚未先经过全量 T038 医学实体 gating，T039 词表候选没有触发；因此 selector 主要在无候选场景下做 `keep_asr` 或 `manual_edit`。
+
+最终评测输出：
+
+```text
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.md
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.csv
+outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.svg
+outputs/primock57/t045_case_summary_three_texts/t045_case_summary_final_evaluation_run.json
+```
+
+最终聚合表：
+
+| 输入变体 | 样本数 | Precision | Recall | F1 | Critical recall | ROUGE-L F1 | Omission | Unsupported | Contradicted | Uncertainty 缺失 | F1 Δ vs noisy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `noisy_asr` | 57 | 0.939 | 0.834 | 0.876 | 0.833 | 0.804 | 87 | 20 | 10 | 57 | 0.000 |
+| real `doctor_llm_repair` | 57 | 0.868 | 0.877 | 0.866 | 0.881 | 0.788 | 62 | 58 | 20 | 46 | -0.010 |
+| `clean_reference` oracle | 57 | 1.000 | 1.000 | 1.000 | 1.000 | 0.932 | 0 | 0 | 0 | 0 | 0.124 |
+
+结论：
+
+- real repair 相对 noisy：Recall +0.043、Critical recall +0.048、Omission -25；
+- 但 Precision 从 0.939 降到 0.868，Unsupported 从 20 增到 58，Contradicted 从 10 增到 20；
+- 因此 F1 从 0.876 小幅降到 0.866；
+- 说明当前 selector 提高了事实覆盖，但也引入了更多不支持/冲突事实；后续应抽样复核 manual edit，并优先补全候选覆盖后复跑。
+
+验证：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check scripts/run_t045_case_summary_final_evaluation.py scripts/run_t045_doctor_llm_selector.py
+```
+
+结果：`All checks passed!`
+
+隐私与边界：
+
+- selector feedback / decisions 不读取或记录 clean/reference、gold facts 或病例摘要输出；
+- decisions/feedback 包含 span 级原词、候选、选择、理由、是否修改，属于本地研究输出，默认不提交 Git；
+- real `doctor_llm_repair` 是模拟 LLM 审阅产物，不是真实医生确认；
+- 病例摘要评测仍是 deterministic keyword baseline + 自动 gold facts，适合管线和相对变化观察，不替代人工临床事实核查。
+
+## 2026-07-10：生成第二周暑期实践周报
+
+任务来源：用户提供暑期实践周报模板和第一周示例，要求生成第二周周报 LaTeX；特别提醒第二周工作不止 T045，需要参考任务记录完整整理。
+
+本轮处理：
+
+- 新增 `docs/week2_practice_report.tex`。
+- 周报按统一模板组织为：
+  - 本周目标；
+  - 本周完成内容；
+  - 本周可展示成果；
+  - 当前结果与初步结论；
+  - 遇到的问题与当前判断；
+  - 下周计划。
+- 内容覆盖第二周主要工作，而不是只写 T045：
+  - T031 ASR noisy / confidence / top-k 初评；
+  - T038/T039 医学实体优先审阅和候选覆盖改进；
+  - T040/T041/T042 confirmed transcript 与病例摘要下游评估链路；
+  - T043/T044 置信度来源和黄/红词级 LLM 候选逻辑；
+  - PriMock57 全量 57 条 consultation / 114 路 channel ASR noisy transcript 新集；
+  - T045 三文本病例摘要评测和 real doctor LLM selector / repair 最终结果。
+- 报告中的图位已按用户要求写入绝对路径：
+  - PNG 占位：`D:/Chasingfordream/内地部分/文书合集/清华大学神经调控/project/outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.png`
+  - 当前已有 SVG：`D:/Chasingfordream/内地部分/文书合集/清华大学神经调控/project/outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.svg`
+- 报告只使用聚合指标、路径和结构化产物说明，不写完整 transcript、prompt、病例正文、API key 或真实患者隐私。
+
+关键写入指标：
+
+- 全量 noisy ASR：57 条 consultation、114 路 channel、75,597 个 ASR words、2,095 个 ASR segments、2,861 个风险 span。
+- 小样本 ASR 初评：micro WER 0.3405，micro medical concept WER 0.2526，绿色词错误率 15.43%，黄色词错误率 47.85%。
+- T045 最终评测：
+  - `noisy_asr`：Precision 0.939，Recall 0.834，F1 0.876，Critical recall 0.833，Omission 87；
+  - real `doctor_llm_repair`：Precision 0.868，Recall 0.877，F1 0.866，Critical recall 0.881，Omission 62；
+  - `clean_reference` oracle：Precision/Recall/F1/Critical recall 均为 1.000。
+
+验证：
+
+- 已用 UTF-8 读取检查 `docs/week2_practice_report.tex` 头尾内容。
+- 已检查 `\begin{...}` / `\end{...}` 环境基本配对。
+- 当前本机未检测到 `xelatex` / `pdflatex` / `lualatex`，因此未进行 PDF 编译验证；LaTeX 中已加入图片缺失占位逻辑，便于后续上传或转换 PNG 后编译。
+
+后续建议：
+
+- 若要直接编译 PDF，建议将现有 SVG 转为同名 PNG 或 PDF，放到周报中预留的绝对路径。
+- 下周周报可直接复用本文件结构，并让“下周计划”对齐为第三周“本周目标”。
+
+## 2026-07-13：病例摘要字段条件化说话人软权重
+
+背景：下游病例摘要需要利用医生语言在检查解释、临床评估和诊疗计划方面的信息密度，同时避免全局提高医生权重后遗漏患者主诉、症状、否定症状和病史。采用“摘要字段 × 说话人角色”的条件化软权重方案，并保留角色盲消融。
+
+实现：
+
+- `src/clinical_asr_robustness/case_summary_generation.py`
+  - prompt 升级为 `case_summary_prompt/v3_input_variant_role_field_weighting`；
+  - 新增 `field_conditioned_v1` 与 `role_blind` 两种 profile，默认启用前者；
+  - 主诉/现病史/症状/否定症状/病史提高患者证据优先级，检查/评估/计划提高医生证据优先级，药物字段区分患者自述用药与医生新开药/剂量调整；
+  - 明确权重是相对证据优先级而非事实概率，医生提问不算事实，医患冲突需保留归因或写入 `uncertainty_notes`；
+  - generation records 与聚合 summary 记录 profile、字段权重和 `gold_facts_unchanged=true`。
+- `scripts/generate_case_summaries.py`
+  - 新增 `--evidence-weighting-profile field_conditioned_v1|role_blind`；
+  - run config 记录实际使用的 profile。
+- `tests/test_case_summary_generation.py`
+  - 覆盖默认字段权重 prompt、安全冲突规则、角色盲消融和 records/summary 元数据。
+
+边界：本轮只接入可复跑的 prompt 层软证据先验，没有修改 T042 gold facts 或事实评估逻辑，也没有声称权重已提升病例摘要质量。后续需使用同一独立病例摘要 LLM、同一三类 input variants 和同一解码参数，分别运行 `role_blind` 与 `field_conditioned_v1`，比较字段级 F1、critical recall、unsupported、contradicted 和 omission，并抽样人工复核。
+
+验证：
+
+- `python -m pytest tests/test_case_summary_generation.py --basetemp=.pytest_tmp`：8 passed；
+- `python -m pytest --basetemp=.pytest_tmp`：80 passed；
+- `python -m ruff check src/clinical_asr_robustness/case_summary_generation.py scripts/generate_case_summaries.py tests/test_case_summary_generation.py`：All checks passed；
+- 两种 profile 各完成 1 条 noisy ASR dry-run，输出位于 `outputs/primock57/t041_role_weighting_smoke/`；聚合 summary 正确区分 `soft_prompt_role_field_prior` / `role_blind_ablation`，并确认不包含 transcript 正文。
+
+## 2026-07-13：T046 说话人字段权重全量消融与展示图
+
+任务：比较病例摘要加入医生/患者字段条件软权重后与原始 `role_blind` 基线的质量，验收产物为可展示图。
+
+对照设计：
+
+- 输入固定为 PriMock57 全量 57 条 consultation / 114 路 noisy ASR；
+- 两组使用同一 `Qwen3-Coder-Plus`、`temperature=0`、同一 schema；
+- 正式批次使用英文摘要，与英文 transcript 和 T045 的 516 条英文自动 gold facts 对齐；
+- 唯一变量为 `evidence_weighting_profile=role_blind|field_conditioned_v1`；
+- 使用 T042 B-lite 事实级评测，并补充 consultation 级配对 bootstrap CI 与 sign test。
+
+运行改进：
+
+- `scripts/generate_case_summaries.py` 新增 `--workers` 与 `--max-attempts`；
+- `src/clinical_asr_robustness/case_summary_generation.py` 支持有限线程并发和单条失败重试；默认仍为 `workers=1`、`max_attempts=1`，保持向后兼容；
+- 首轮全量遇到一条模型残缺 JSON，加入单条重试后两组均完成 57/57；
+- 默认中文摘要与英文 gold facts 产生语言错配，micro F1 接近 0；该批次作为失败诊断保留，不纳入正式结论。
+
+正式结果：
+
+- `role_blind`：Precision 0.1477，Recall 0.2674，micro F1 0.1903，Critical recall 0.2778，Omission 378；
+- `field_conditioned_v1`：Precision 0.1345，Recall 0.2558，micro F1 0.1763，Critical recall 0.2556，Omission 384；
+- 差值（加权减基线）：micro F1 -0.0140，Precision -0.0132，Recall -0.0116，Critical recall -0.0222，Supported -12，Unsupported +85，Contradicted -6，Omission +6；
+- 56 条可计算 record-level F1 中，改善 14、持平 10、下降 32；平均 Δ=-0.0135，bootstrap 95% CI [-0.0250, -0.0023]，双侧 sign-test `p=0.0114`。
+
+结论：本轮字段条件软权重没有优于原始 `role_blind`。显式数字权重可能诱导模型扩写高权重字段：摘要事实总数增加 67，但 supported 减少、unsupported 明显增加。该解释仍需抽样人工复核。
+
+产物：
+
+- `scripts/build_t046_speaker_weight_ablation_report.py`；
+- `docs/t046_speaker_weight_ablation.md`；
+- `outputs/primock57/t046_speaker_weight_ablation/t046_speaker_weight_ablation_figure.png`；
+- 同目录 SVG、CSV、Markdown 和 JSON summary。
+
+隐私与边界：聚合图和报告不包含 transcript、病例正文或可识别信息；generation records 含完整 noisy transcript 和模型输出，仅保存在默认不提交的 `outputs/`。所有生成摘要为研究输出，不构成临床建议。
+
+## 2026-07-13：T047 ASR 绿黄红阈值重分级
+
+背景：T028 全量 NeMo 原生 `word_confidence` 共 75,597 个词，旧阈值
+`green >= 0.80`、`yellow >= 0.50` 得到 green 71,569、yellow 4,028、red 0；
+实际最小 confidence 为 0.52682，因此旧红色下界脱离当前分数尺度，交互界面中的
+红色风险等级没有作用。
+
+阈值选择：在 T031 的 3 条 reference 对齐记录上离线比较候选阈值，最终选择
+`green >= 0.90`、`yellow >= 0.80`、`red < 0.80`。同一批 1,958 个对齐词中，
+green 990 / error 77 / error rate 0.0778，yellow 805 / error 200 / error rate
+0.2484，red 163 / error 78 / error rate 0.4785，形成单调风险梯度。该结果只支持
+当前 PriMock57 + NeMo 原生 word confidence 的研究性操作点，不是临床级校准。
+
+实现：
+
+- `ConfidenceThresholds`、T028 导出 CLI 和全量 chunk runner 默认改为 0.90/0.80；
+- 新增 `reclassify_confidence_record()`，同步重算 record、word、segment 和
+  `uncertain_spans`；已有 `asr_alternatives` 时拒绝处理，避免候选绑定旧 span；
+- 新增 `scripts/reclassify_asr_confidence_thresholds.py`，允许不重跑 ASR、且不读取
+  reference 正文地离线重分级，并保留旧输入产物；
+- 更新 schema、T028/T031/T032 文档和回归测试。
+
+全量结果：114 路、75,597 词，green 51,710（68.40%）、yellow 19,859
+（26.27%）、red 4,028（5.33%）；待审 `uncertain_spans` 从 2,861 增至 10,130。
+新产物为
+`outputs/primock57/t028_nemo_asr_confidence/primock57_asr_confidence_full_three_level.jsonl`，
+聚合记录为同目录 `t028_confidence_threshold_reclassification_summary.json`。
+
+交互验收：基于新三档文件生成
+`outputs/primock57/t047_three_level_review/primock57_t047_review.html`，共 114 条
+review samples、75,597 个词、10,130 个待审 span；词级 green/yellow/red 数与重分级
+summary 一致，span 级 yellow 7,688、red 2,442。该页面由 T028 原始记录直接构建，
+目前 `spans_with_candidates=0`，可验证颜色、优先级和手工编辑/保留/拒绝流程，但
+top-k 候选仍需从新三档输入重跑 T029/T038/T044 后再验收。
+
+验证：目标 pytest 9 passed；目标 ruff 检查通过；重分级脚本逐行完成 Pydantic
+解析和重建。后续 T029/T038/医生反馈实验应显式使用新三档文件重跑；既往 T045
+结果仍绑定旧阈值文件，不能静默替换后继续比较。
+## 2026-07-13：T048 医生审阅网页人性化改版
+
+基于 T047 三档置信度审阅页完成单文件 HTML 交互改版。原页面一次罗列 114 路对话，长页面滚动后审阅控件远离当前词；新版改为顶部“当前对话”按钮展开可搜索列表，每次只渲染一段 doctor/patient 声道文本，并提供前后对话按钮。桌面端审阅面板使用视口内 sticky 定位，窄屏使用底部抽屉，解决跨段滚动后候选与操作控件停留在上一位置的问题。
+
+视觉上采用深青绿色医疗机构风格，保留 green ≥ 0.90、yellow ≥ 0.80、red < 0.80 的研究阈值和颜色语义，并补充文字标签、虚线可点击提示、焦点样式和已确认勾选，避免只依赖颜色传达状态。交互新增局部语境、前后风险词跳转、保存并下一个、对话内与全局进度、反馈本地恢复、搜索、键盘 Enter/Space 激活、移动端关闭和反馈 JSONL 统一导出；没有候选时明确引导保留原文、手动编辑、拒绝或无法判断，不把辅助候选视为正确答案。
+
+改动位于 `src/clinical_asr_robustness/review_workflow.py`，并重新生成 `outputs/primock57/t047_three_level_review/primock57_t047_review.html`。验证：`tests/test_review_workflow.py` 与 `tests/test_medical_entity_review.py` 合计 14 passed；目标 ruff 检查通过；生成页内嵌 JavaScript 语法检查通过。页面仍是研究原型，不构成临床建议；当前 T047 输入是全词三档置信度，后续接入 T038 医学实体 gating 后，同一界面会自动切换为“实体高亮、非实体黑字”的医学实体优先显示。
+
+## 2026-07-13：T047 医学实体优先高亮与 LLM 候选闭环修复
+
+针对 T047 页面“普通词也全部着色、绝大多数风险词没有候选”的问题，确认旧页面直接从全量 T028 三档文件构建，绕过了 T038 医学实体 gating；旧 T029 全量运行也只导出了 T044 prompt，未传 `--run-llm-candidates`，因此候选数为 0。本轮恢复完整 `T028 three-level → T038 → T029/T044 → T030` 链路。
+
+T038 使用 `Qwen3-Coder-Plus` 的 114 路缓存实体结果重新 gating。全量运行时发现两类工程问题并修复：长 transcript 的 1,600 token 输出上限会截断实体 JSON，因此提高为 4,096；脚本新增单条重试、逐条缓存和有限并发，避免中途格式错误丢失已完成调用。进一步抽查唯一无候选 span 时发现，LLM 偶尔返回正确实体文本但错误字符偏移；旧逻辑盲目信任偏移，导致相邻普通词被误标。现在字符偏移只有在对应 transcript 子串与实体文本规整后一致时才采用，否则回退到实体文本匹配，并新增回归测试。
+
+修正后的 T038 结果：114 路、75,597 词中有 3,025 个医学实体着色词，其他词写入 `display_confidence_level=neutral` 并在界面显示为黑色；得到 589 个黄/红医学实体审阅 span，其中 yellow 516、red 73。实体缓存复跑为 `cache_hits=114`、`llm_calls=0`，未再次调用实体模型。
+
+T029/T044 新增基于完整 messages 的 SHA-256 响应缓存、API 重试和 record 级有限并发。只对 710 个黄/红医学实体目标词生成候选，复用 108 条缓存并新增 602 次调用，最终写入 1,732 个 `scope=word`、`source=llm_word_candidate` 候选；589/589 个审阅 span 均有候选。候选明确标注 `asr_native_candidate=false`、`reference_used=false`，不与 ASR 原生 n-best 混同。
+
+最终页面已重建为 `outputs/primock57/t047_three_level_review/primock57_t047_review.html`。验证包括：`tests/test_asr_nbest_candidates.py`、`tests/test_medical_entity_review.py`、`tests/test_review_workflow.py` 合计 20 passed；相关 ruff 检查通过；单文件 HTML 内嵌 JavaScript 语法检查通过。浏览器插件连接连续超时，未完成本轮点击式目视验收；应由用户在 IDE/本地浏览器中抽查候选内容与实体边界。
+
+同时评估了“在黄/红医学实体旁播放邻近原始音频”的设想，暂未实现。现有 record 已有 `audio_filepath`，word/span 已有 `start_sec`/`end_sec`，因此原型技术难度不高：可使用共享 `<audio>` 元素，在点击 span 播放键时定位到 `start_sec - padding`，并在 `end_sec + padding` 自动暂停。主要工程点是本地 HTML 与音频相对路径/HTTP 服务、浏览器 seek 与预加载、长 WAV 的按需读取、doctor/patient 声道对应、时间戳边界及隐私日志。研究表达上应将贡献定位为“医学实体 gating + ASR 风险分级 + 局部声学证据 + 医生反馈闭环”，而不是把播放按钮本身视为独立算法创新。
+
+## 2026-07-13：T049 黄/红词局部音频回听与确认单选状态修复
+
+按后续需求实现了此前只评估、未落地的局部音频功能。`build_review_html()` 新增 `html_output_path` / `project_root` 参数，在 HTML 内嵌数据中为每条 review sample 生成相对于最终 HTML 的 `metadata.review_audio_url`；JSONL 中仍保留项目相对 `audio_filepath`，不写入新的本地绝对路径。T030/T036 两个生成脚本均传入最终 HTML 路径，因此直接以 `file://` 打开或从项目根目录启动静态服务时都能解析到 `data/external/primock57/audio/*.wav`。
+
+页面使用一个共享、`preload=metadata` 的 HTML5 `<audio>` 元素，不复制或预切割音频。每个可审阅且显示为 yellow/red 的词旁加入圆形播放键，按该词 `start_sec` / `end_sec` 播放前后各 1.5 秒；侧栏另提供 span 级“播放附近原始音频”按钮。切换对话、切换 span 或按 Escape 时停止旧播放；再次点击当前播放键可暂停；到窗口结束时间自动暂停。加载/播放失败会在侧栏和 toast 中明确提示。反馈状态新增 `audio_play_count` 与 `last_audio_window`，导出 JSONL 的 metadata 同步记录播放次数、最近窗口及 padding，便于后续分析医生是否依赖声学证据和回听成本。
+
+同时修复确认方式可重复勾选的问题。根因是候选使用 `name="candidate"`、保留 ASR/手动编辑/拒绝/无法判断使用 `name="action"`，浏览器将其视为两个 radio group。现在所有候选和动作统一使用 `name="decision"`，通过 `data-decision-action` 区分动作；选择候选会将 action 设为 `select_alternative`，选择任一其他动作会清空 `selected_alternative_id`，聚焦手动编辑框会选中 `manual_edit` 并取消候选。`getState()` 会规范化旧 `clinical_asr_review_state_v2` localStorage 状态，避免旧页面留下的“accept_asr + candidate id”矛盾重新出现。
+
+正式 T047 页面已重新生成。全量验证：114/114 条 sample 有音频路径且对应 WAV 文件存在；589/589 个审阅 span 有时间戳；710/710 个 yellow/red 审阅词有词级时间戳。生成页只包含 `name="decision"`，不再包含旧 `name="candidate"` 或 `name="action"`；内嵌 JavaScript 语法检查通过。`tests/test_asr_nbest_candidates.py`、`tests/test_medical_entity_review.py`、`tests/test_review_workflow.py` 合计 20 passed，目标 ruff 检查通过。自动浏览器验收未执行：当前 Browser 插件目录缺少技能要求的 `scripts/browser-client.mjs`（仅有 `open-chrome-window.js`），按技能约束未改用其他浏览器自动化绕过；仍建议用户在本地页面抽查一次真实播放、自动停止和单选切换。
+
+## 2026-07-14：T050 远程程控精选 40 例真实数据盘点与迁移评估
+
+背景：用户计划把受保护目录 `远程程控人工复核资料_精选40例_无病历版_20260713`
+接入现有 ASR 置信度交互审阅与病例信息整理系统，需要先形成可跨对话恢复的知识记录，
+并确认从 PriMock57 迁移到真实中文远程程控数据还缺哪些条件。本轮仅做只读盘点和文档
+记录，没有复制、修改或提交原音频、逐例转录和病例映射。
+
+授权补充：用户于 2026-07-14 明确确认本批数据的外部 LLM、外部 ASR 和原音频处理均
+已经获审。因此在线模型不是迁移阻塞，授权范围不再作为迁移问题；实验只按
+复现要求记录 endpoint/服务商、模型、输入字段和运行配置。
+
+数据快照：
+
+- 40 例、642 个文件、686,806,868 bytes；每例固定为 1 个 MP3、14 个 TXT 和
+  1 个说明 Markdown；根级另有隐私说明和 40 行清单；
+- 音频合计约 11.84 小时，单例约 4.68–63.15 分钟；40/40 为 48 kHz 单声道 MP3；
+- 每例包含供应商未核实的商业转录、4 个当前开源模型的有/无医疗先验两版、4 个旧版
+  开源转录，以及 `Qwen结构化医学先验v3 + source-aware审计v2` 生成的说话人/信息来源
+  推荐转录；所有文本均为自动结果，不是 clean/reference；
+- 推荐转录共 5,942 个自动时间片段；说话人数 K=2–6，角色含医生、患者、家属/照护者、
+  工作人员和未知，未知角色 993 段；发现 187 个零时长片段，5 例末段距音频结尾超过
+  10 秒；
+- 清单虽给出 889 个“高置信片段”和 1,629 个“待核医疗片段”，但没有逐片段分数、
+  阈值、触发原因、ASR posterior 或运行配置，不能映射为当前 ASR 原生置信度；
+- SenseVoice 的有/无先验结果 40/40 完全相同；Qwen3-ASR 和 Whisper-large-v3 存在
+  明显长度异常与短输出，使用多模型文本作候选前必须做 QC；
+
+迁移结论：
+
+1. 本地 NeMo 只有英文 `stt_en_fastconformer_ctc_large`，不能用于中文数据；T028
+   长音频分窗使用 Python `wave`，不能直接读取 MP3；
+2. 当前数据没有人工 reference、真实 confirmed transcript、独立 gold facts、ASR 原生
+   词级置信度、词时间戳或同解码器 n-best，暂不能做可靠 CER/校准/top-k/下游质量评估；
+3. `nemo_confidence_export.py`、`review_workflow.py` 和反馈回放多处依赖
+   `transcript.split()`，英文医学关键词/边界规则也依赖空格 token，必须改为中文字符/
+   子词偏移后才能保证高亮、候选绑定和 confirmed transcript 不被错误加空格；
+4. PriMock57 的 doctor/patient 双通道、0.90/0.80 置信度阈值和英文医学实体规则不能
+   迁移到 K=2–6 的中文多参与者场景。需要区分声学 speaker 与语义 role，并扩展家属、
+   工作人员、未知等角色；
+5. 下游 summary 聚合仍写死 `dataset=primock57`，字段权重只考虑 doctor/patient；远程
+   程控还需设备/侧别、触点、幅度/电压/电流、脉宽、频率、开关状态、调整前后、症状、
+   不良反应和随访计划等 DBS 专用 gold schema。
+
+建议按时长、K 和异常程度选 5 例建立 pilot：人工 reference + 角色映射 + 医学/DBS
+gold；之后适配中文 manifest、MP3→WAV 或 MP3 解码、中文 ASR 原生 confidence/n-best、
+字符级审阅回放、多角色 schema 和外部 LLM 调用审计。专项记录：
+`docs/remote_programming_40_dataset_assessment.md`。
+
+## 2026-07-14：T050 中文 ASR 全流程 deep research 与 P0 重排
+
+用户进一步明确：人工 clean/reference、人工角色和下游 gold 都属于评估层，当前不先做；
+首要目标是让精选 40 例从中文 MP3 完整经过 ASR 风险交互审阅、feedback、confirmed
+transcript 和病例信息整理。本轮据此将这些人工真值任务从 P0 移到后续评估阶段。
+
+现有实现核查确认，中文迁移不是只换模型：本地模型仍是英文
+`stt_en_fastconformer_ctc_large`，T028 长音频分窗用 `wave.open()`；schema、候选、页面和
+feedback 回放多处依赖 `transcript.split()`/空格 join，会把无空格中文当成单 token 或在
+confirmed transcript 中错误插空格。因此 P0 数据协议改为 provider unit +
+`char_start/char_end` + `display_joiner=""`，文本修改按字符区间从右向左确定性回放。
+
+官方能力调研后的路线：
+
+1. P0 首选 Google Cloud Speech-to-Text V2 `chirp_2 + cmn-Hans-CN +
+   asia-southeast1 + BatchRecognize`。它支持中文、长音频、MP3 自动解码、字词时间戳、
+   模型自适应和字词级数值，最容易接现有逐词回听页面；
+2. Google 官方将字词 confidence 标为 Preview，Chirp 2 文档还说明返回值不是真正的
+   confidence。因此统一记录为 `uncalibrated_provider_score`，允许缺失；P0 使用
+   `demo_quantile_v0`（低 10% 红、后 20% 黄、其余绿）控制审阅预算，不声称校准；
+3. Google alternatives 不保证返回；原生候选为空时可使用明确标源的包内多模型候选和
+   已获审外部 LLM 候选；
+4. Chirp 2 中文不含说话人区分，P0 先按时间重叠复用现有 source-aware 自动角色；
+5. Azure Batch Transcription 是云端备选，能一次返回 phrase confidence/n-best、逐词
+   时间戳和 speaker，但没有逐词 confidence，应按 segment 着色或标明 phrase score 传播；
+6. FunASR Paraformer-zh 是后续本地可控路线，支持中文字符时间戳、VAD、标点、热词和
+   说话人；其源码内部有 decoder scores/beam/n-best，但标准结果不导出逐 token posterior
+   或 hypothesis score，需要定制 adapter，不作为最快 P0。
+
+工程顺序改为 1 → 5 → 40 例：先建 manifest 和 1 例 Chirp 2 adapter smoke test，再改
+中文 schema/页面/feedback，接 provider/LLM 候选和中文 DBS 实体，最后扩到 40 例并贯通
+病例信息整理。当前 WSL `clinical-asr` 尚未安装 `google.cloud.speech_v2`、Azure SDK 或
+FunASR；这是后续接入工作，不是数据问题。完整研究记录与官方来源：
+`docs/t050_chinese_asr_flow_research.md`。
+
+## 2026-07-14：T050 Qwen 27B 自动病历补充包识别与定位
+
+新增受保护目录 `远程程控精选40例_Qwen病历_20260714_加密/远程程控精选40例_Qwen病历_20260714`。
+只读盘点得到 40 份 `病例_XXXX_Qwen病历_v1.7.5.md` 和 1 个 `.DS_Store`；40 个匿名病例
+编号与 20260713 无病历版完全一致。用户转述生成链为“带医学先验的 Qwen ASR 模型转录，
+再由本地 Qwen 27B 生成病历”。
+
+这批 Markdown 是下游 `noisy_asr → case_summary` 自动产物，不是新的音频/ASR 资产。
+正文平均约 166 字符，栏目出现数为处置 38、现病史 29、随访计划 20、查体 8、主诉 6、
+既往史/过敏史 4；20/40 含“需核实”，4 份只有一个栏目，最短记录只有 11 字符。因此其
+定位是现成的 Qwen-ASR 输入下自动病历 baseline 和格式参考，不是人工病历、clean/reference、
+confirmed transcript 或 gold facts，也不能倒灌为转录真值。
+
+P0 流程可以保留这批结果作为“确认前病历输出”对照，但不需要把它作为流程输入。以后若
+比较 confirmed transcript 带来的病例整理变化，应使用同一 Qwen 27B、同一 prompt/schema
+和同一解码设置分别处理原始带医学先验 Qwen ASR 与 confirmed transcript。当前文件没有
+提供精确 ASR/27B 模型标识、prompt 和运行配置，`v1.7.5` 暂仅记录为产物版本标签。
+
+## 2026-07-14：T050 Parakeet CTC 0.6B Mandarin-English 迁移调研
+
+用户希望实训项目尽量统一 ASR 模型，不再因为中文/英文直接切换到完全不同的服务或架构。
+本轮只读核对 NVIDIA NGC collection、声学模型卡、英文 Hugging Face 模型卡、Riva protobuf
+和 NVIDIA Riva/NeMo 教程，并检查本项目现有 checkpoint、NeMo 版本与 GPU；未下载新模型、
+未处理受保护音频，也未修改 ASR 运行代码。
+
+官方确认：
+
+- `Parakeet-CTC-XL-unified-0.6b_spe7k_zh-CN_3.0` 为约 600M 参数的
+  FastConformer-CTC，训练数据超过 17,000 小时，覆盖 `zh-CN`/`en-US` 并明确支持中英
+  code-switch；声学模型每个时间步输出词表 token log probability；
+- NGC collection 含中英 code-switch 4-gram LM、中文 WFST/Sparrowhawk ITN、Silero VAD
+  和 Mandarin/English Sortformer；Sortformer 只给 acoustic speaker label，不给
+  doctor/patient/family/staff 语义角色；
+- 可训练声学 artifact 为
+  `nvidia/riva/parakeet-ctc-riva-0-6b-unified-zh-cn:trainable_v3.0`，压缩体积约
+  2.18 GB，模型卡要求 Riva 2.19.0+、Linux/NVIDIA GPU，并受 NVIDIA Community Model
+  License 管理；
+- Riva 标准 ASR proto 支持 `max_alternatives`、top hypothesis 的 word timestamp/
+  confidence、speaker tag 和 language code，但 confidence 不保证准确或始终存在，标准
+  服务接口也不提供完整 `[T,V]` CTC 分布；若研究需要 raw logits，应优先直接恢复 trainable
+  NeMo artifact，而不是只调用 Riva/NIM 服务。
+
+本地核查：
+
+- 当前英文 `stt_en_fastconformer_ctc_large.nemo` 大小约 463 MB，官方模型卡为约 115M
+  参数、1,024 SentencePiece 词表，并不是 Parakeet 0.6B；
+- 若统一模型家族，英文应改为 `nvidia/parakeet-ctc-0.6b`，或让全部语言都使用 bilingual
+  unified checkpoint。不同 checkpoint 只能称为“同一架构/模型家族”，不能写成同一个
+  已训练模型；
+- WSL `clinical-asr` 当前为 NeMo 3.1.0、PyTorch 2.11.0+cu126；GPU 为 RTX 4060 Laptop
+  8 GB。官方完整 Riva collection 推荐 H100/A100/L40，因此首轮采用直接 NeMo、
+  `batch_size=1`、FP16/BF16、15–30 秒 VAD 短段；现有 120 秒窗口不能先验复用。
+
+关键迁移风险：
+
+1. 中文 unified 的 `spe7k` tokenizer/decoder 与英文 1,024 词表不同，必须恢复完整
+   checkpoint 配置，不能只换 state dict；置信度阈值和校准也必须按 checkpoint/语言重做；
+2. 模型/Riva 不直接接收当前 48 kHz MP3；需确定性解码为 mono PCM/FLAC，并把 VAD/窗口
+   内时间恢复为原音频绝对时间；
+3. 现有 T043/T028 仍以 `transcript.split()` 为 word 锚点，中文会退化成整段单词；应改为
+   CTC/SentencePiece emitted token + 合并字词 span + `char_start/char_end`；
+4. 帧 top-k 含 blank、重复和不完整子词，不能直接作为医生候选；应由 acoustic/4-gram LM
+   beam 生成 sequence n-best，再按字符区间对齐成局部 span 候选；
+5. raw CTC entropy/max-prob 不等于校准正确率；中文、英文、code-switch 和不同词表不能
+   共享阈值。P0 仍用 `demo_quantile_v0`，后续用人工 reference 分层校准；
+6. LM、标点和 ITN 会改变文本长度，尤其会改写 DBS 参数、剂量、频率和日期。必须并存
+   `am_raw`、`decoded_with_lm`、`display_itn` 及变换/对齐日志，不能把 raw confidence
+   无映射地贴到 ITN 文本；
+7. 40 例有 2–6 名参与者，Sortformer 仍需与 source-aware 自动 role 按时间重叠映射；
+   官方只明确最多 4 人同时说话，超出范围或映射失败应保留 `unknown`；
+8. 官方模型卡未给出本场景可直接引用的 CER/WER，因此普通话/英文/code-switch 支持成立
+   不代表 DBS 临床术语和数字已达标，仍需 pilot 实测。
+
+决策：P0 主线由 Google Chirp 2 调整为直接 NeMo 恢复 Parakeet Mandarin-English
+`trainable_v3.0`；Google 保留为 8 GB 显存或 artifact 兼容失败时的回退。下一步先做 NGC
+访问/许可确认和 checkpoint restore-only，再做 15–30 秒三类语言 smoke test，不先部署完整
+Riva/NIM。详细路线、官方链接和 P0 完成定义已更新到
+`docs/t050_chinese_asr_flow_research.md`。
+
+## 2026-07-14：TODO 精简、中文 40 例完整拆解与本地资产归位
+
+按用户决定，当前主线正式切换为真实中文医患对话的完整闭环：`audio → ASR → noisy
+transcript + ASR confidence + n-best/top-k → 医学实体优先审阅 → 人工 confirmed transcript →
+raw/confirmed/reference 下游鲁棒性评估`。
+
+本轮将原 `docs/todo.md` 中已经完成的 PriMock57 T045–T049 产物清单、旧提示词全文、旧阈值
+细节和长篇最近完成记录移出当前交接面；这些历史证据继续保存在本文件及对应专项文档。
+新 TODO 改为 T051–T067 的可验收任务，覆盖数据快照、checkpoint restore、音频预处理、
+1→5→40 例 ASR、中文字符区间 schema、未校准风险颜色、原生 n-best、医学实体筛选、审阅页、
+真实人工确认、独立 reference/gold、ASR/置信度/候选评估、三输入下游评估，以及最终图表和
+演示交付。只有独立 reference/gold 与真实人工确认齐备后才能宣称质量提升。
+
+本地资产已按语义归位，且均受 `.gitignore` 保护：
+
+- 原始 40 例包：`data/raw/remote_programming_40/远程程控人工复核资料_精选40例_无病历版_20260713/`；
+- Qwen 自动病历 baseline：`data/external/remote_programming_40/远程程控精选40例_Qwen病历_20260714_加密/`；
+- unified Parakeet artifact：`data/external/asr_models/nemo/Parakeet-Hybrid-XL-unified-0.6b_spe7k_zh-en-CN_3.0.nemo`。
+
+迁移前聚合盘点保持不变：原始包 642 个文件、686,806,868 bytes，其中 40 个 MP3；Qwen 包
+41 个文件；Parakeet artifact 2,338,476,221 bytes。文件名含 `Hybrid`，与先前调研的 CTC
+artifact 命名不完全一致，故下一步必须 restore-only 核验真实模型类、tokenizer 和解码配置，
+不能仅凭文件名假定可直接导出完整 CTC frame posterior。
+
+## 2026-07-14：T051–T060 中文真实数据增量集成与最短整例闭环
+
+按“保留 PriMock57 英文主线、只增加数据集差异逻辑”的约束完成第一阶段实现。数据和模型均
+已归位到项目的 Git 忽略目录；未把真实对话、病例正文、模型权重或中间输出加入版本控制。
+
+### 数据与 checkpoint
+
+新增 `build_remote_programming_40_manifest.py`，生成 40 条匿名 ASR manifest 和逐文件
+SHA-256 快照。raw + Qwen 共 683 个文件、686,834,687 bytes；40 个 MP3 总时长
+42,626.664 秒，快照 digest 为
+`5d219620861b9dd4ad34296dec4caeff2de5aeeff2ac743c069fe19c01572994`。
+
+本地 Hybrid artifact 大小 2,338,476,221 bytes，SHA-256 为
+`0ac223ddf6ed7366d5c662abcc8d6a827767c44b93937e0f8f04ae05dba45e6a`。WSL
+`clinical-asr` restore-only 确认真实类是 `EncDecHybridRNNTCTCBPEModel`，16 kHz、
+SentencePiece BPE 7,000、auxiliary CTC blank id 7,000；环境为 NeMo 3.1.0、PyTorch/
+torchaudio 2.11.0+cu126、RTX 4060 Laptop。原始下载页面/许可证凭据没有嵌入本地 artifact，
+公开发布或重新分发前仍需补齐。
+
+### 共用代码路径
+
+新增 `dataset_profiles.py`，当前只识别 `primock57` 与 `remote_programming_40`。无提示时
+回退到历史英文；中文选择 Hybrid checkpoint、auxiliary CTC frame distribution、
+`demo_quantile_v0` 和独立输出根目录；英文仍选择 FastConformer、NeMo word confidence、
+历史固定阈值。T028、T037、T038、T029、T030、T036、T035 没有复制为第二套系统。
+
+核心兼容改动：
+
+- Hybrid 模型的 confidence 和 beam 解码走 auxiliary CTC，纯 CTC 分支保持不变；
+- 中文 timestamp/字符单元保存 `char_start/char_end`、原始分隔符和 nullable 信号，不再以
+  `.split()` 为真值；
+- CTC emitted BPE 表面文本可聚合到中文字/词，segment/span 和页面不插入额外空格；
+- T035 反馈按字符范围从右向左回放；
+- 中文医学实体采用 Unicode NFKC 规范化，忽略 ASR 分词空格/标点后映射回原字符范围；
+- 运行 RTF 从实际 ASR 输入窗口时长求和，不重复累计审阅侧整段时长。
+
+### 音频、整例 ASR 与页面
+
+`preprocess_asr_audio.py` 已实现 MP3 → 16 kHz mono PCM16 连续 30 秒窗，并保存原 MP3
+绝对时间。最短/典型/最长首窗 QC 通过；最短整例为 10 窗，覆盖 0–280.704 秒。
+
+最短整例运行结果：
+
+- confidence：10/10 成功，实际输入 280.661375 秒，transcribe 13.776 秒，RTF 0.0491，
+  峰值 allocated 2.465 GiB；
+- n-best：10/10 成功，transcribe 2.953 秒，RTF 0.0105，峰值 allocated 2.470 GiB；
+- 726 个审阅单元，字符偏移错误 0、绝对时间越界 0；
+- `demo_quantile_v0` 为 green/yellow/red = 507/146/73，明确 `calibrated=false`；
+- 每窗返回 3–5 个去重 acoustic beam，10/10 窗有多个不同序列候选。
+
+复用实体和页面链后，10 条实体缓存记录全部命中；7/7 LLM 实体映射成功，22 个医学单元
+着色，形成 4 个黄/红 span，其中 1 个有局部 n-best 差异候选。最终 T036 单文件 HTML 支持
+接受 ASR、选择候选、手工编辑、拒绝、无法判断和 JSONL 反馈导出；10 个需审阅单元全部有
+原始 MP3 绝对时间。没有伪造真实医生反馈或 confirmed transcript。当前 Codex 会话无可用
+浏览器实例，故浏览器人工点击/截图验收仍留在 T060。
+
+### 验证与后续
+
+整仓 `pytest` 为 95 passed，`ruff check .` 通过。PriMock57 dry-run 继续选择英文 checkpoint、
+`nemo_word_confidence` 和固定阈值；中文 dry-run 选择 Hybrid checkpoint、
+`ctc_frame_distribution`、frame artifact 和 `demo_quantile_v0`。
+
+尚未完成 5 例/40 例、独立 `am_raw/decoded_with_lm/display_itn`、4-gram LM、浏览器人工验收、
+真实人工确认、reference/gold 和正式校准。详细实现与不含正文的结果见
+`docs/t051_t060_chinese_asr_integration.md`；`docs/todo.md` 已把当前焦点推进到 T058/T060。
+
+## 2026-07-14：T068–T070 完整对话审阅、中文 LLM 候选与 NVIDIA diarization 调研
+
+### 问题复核与设计决策
+
+用户指出三项中文链路问题：审阅被 30 秒 ASR 窗口切碎、中文没有实际候选、页面要求按
+说话人分段但尚未完成 diarization。检查最短整例产物确认：约 280.7 秒音频产生 10 条 ASR
+record，过去 T030 也生成 10 条一级 review sample，其中两个窗口仅有 2 个 ASR 单元；T029
+已具备 LLM candidate 代码，但当次运行没有 `--run-llm-candidates`，prompt 仍为英文局部上下文，
+词表仍偏 PriMock57 英文；所有 ASR word 的 `speaker_label` 为空。
+
+决定保留 30 秒窗口作为 ASR 内部推理、失败恢复、绝对时间和反馈回放单元，新增一行一例的
+`asr_review_conversation/v1` 作为医生/研究者/候选上下文单元。conversation 内保存 speaker
+turn、原 window slice 和完整 review sample，从而不破坏 T035 按 record/span 回放。页面按
+`consultation_id` 导航并展示完整对话；speaker 不可用时明确写 `speaker_unknown/说话人待分离`。
+
+### 代码与配置
+
+- `review_workflow.py`：新增 `ReviewConversation`、`ReviewSpeakerTurn`、`ReviewTurnSlice`、
+  conversation JSONL 读写和 speaker turn 聚合；HTML 从按窗口导航改为按病例导航，仍保留
+  每个风险 span 的候选、回听和 feedback key。
+- `build_asr_review_samples.py`：新增 `--conversation-jsonl`，同步输出 window-level 与
+  consultation-level 两种审阅包；运行摘要记录 conversation/turn/diarization status。
+- `dataset_profiles.py`：中文 profile 选择 `zh_dbs_remote_programming_v1`、
+  `complete_consultation`、中文 DBS 词表，并在本批已批准数据范围内默认实际运行 LLM
+  candidate；可用 `--no-run-llm-candidates` 关闭。
+- `asr_nbest_candidates.py` / `extract_asr_nbest_candidates.py`：新增不含 reference 的完整
+  speaker-labeled noisy ASR context、中文保守候选 prompt、独立 cache 路径和可审计 metadata；
+  中文上下文使用字符偏移拼接，不给汉字插空格。
+- `configs/medical_candidate_lexicon.remote_programming_40.json`：新增 DBS 设备、靶点、参数、
+  症状、药名、侧别、数字单位和否定词提示；词表只作候选提示，不是答案或 gold。
+- `run_asr_review_pipeline.py`：按数据集传递词表、prompt profile、context scope、cache 与
+  conversation 输出路径；运行摘要增加上述参数。
+
+### 1 例实际候选与页面结果
+
+在 WSL `clinical-asr` 环境使用现有实体/5-best 产物，按中文完整对话 profile 实际调用外部
+LLM。共 10 条 prompt，10 次 API 请求成功、cache hit 0，生成 25 个
+`llm_word_candidate` word alternatives；4/4 个医学待审 span 均有候选。候选没有自动写回
+confirmed transcript，也没有使用 reference、Qwen 病历或下游摘要。
+
+随后重建审阅产物：window-level review JSONL 仍为 10 条；conversation JSONL 为 1 条，
+内部含 10 个 review samples。由于尚未安装 diarization artifact，当前产生 10 个
+`speaker_unknown` turn，`diarization_status=missing`，这是预期的诚实占位而不是分离结果。
+最终 HTML 的 JavaScript 已通过 Node 语法解析；当前产品没有可用 in-app browser/Chrome
+实例，故没有伪造点击、截图、本地恢复或下载验收，T060 仍为进行中。
+
+上述病例正文、prompt/response、原始音频和候选文本全部留在 Git 忽略目录；项目记录只保存
+聚合数量、配置和路径。
+
+### NVIDIA diarization 结论
+
+官方 Mandarin-English Parakeet 0.6B collection 确实列出独立 Sortformer 组件，支持
+Mandarin/English、流式处理和最多 4 speaker 输出；但当前 2.34 GB Parakeet artifact 恢复类是
+`EncDecHybridRNNTCTCBPEModel`，只负责 ASR，不能从该对象直接取得 speaker。项目本地模型
+目录也没有 Sortformer/VAD/TitaNet 权重。NeMo 快照含 `SortformerEncLabelModel`、
+`ClusteringDiarizer` 和 `OfflineDiarWithASR`，但没有完整迁入官方 speaker_tasks 离线示例和
+配置。
+
+首选 pilot：整例 16 kHz mono 音频单独跑 Sortformer，输出 RTTM/JSONL，再按最大时间重叠
+映射 ASR words；ASR 与 diarization 顺序运行，避免 8 GB GPU 同时常驻。声学
+`spk_0/spk_1` 与 doctor/patient/family/staff role 必须分开。对超过 4 个有效 speaker 或域外
+失败，准备 multilingual VAD + TitaNet + clustering（可选 MSDD）回退。没有人工 RTTM 前只
+报告 speaker 映射覆盖和运行工程指标，不报告 DER/JER 或准确率。
+
+详细调研、官方链接、schema 和 1→5 例门槛见
+`docs/t068_chinese_conversation_candidates_diarization.md`。
+
+### 验证
+
+- 针对性测试：19 passed；
+- 整仓测试：97 passed；
+- `ruff check .`：通过；
+- 真实 1 例 LLM candidate：10/10 请求成功，25 个 word alternatives，4/4 span 有候选；
+- conversation 聚合：1 个病例级记录，内部 10 个 window records；
+- HTML JavaScript 语法解析：通过；
+- 浏览器人工交互：未验收，原因是当前无可用浏览器实例。
+
+下一步是先取得并核验 Sortformer artifact，在 1 例整段音频跑 RTTM→ASR word 映射；同时按
+T058 扩 5 例，复核 LLM 候选的空候选、重复、过度推断和人工可用率，再进行真实医生/研究者
+试审。未通过 5 例门槛前不跑 40 例。
+
+## 2026-07-15：T070 Streaming Sortformer 1 例整段接入
+
+### 模型取得与恢复
+
+用户把 NVIDIA `diar_streaming_sortformer_4spk-v2.1.nemo` 放入
+`data/external/asr_models/nemo/`。文件大小 471,367,680 bytes，SHA-256 为
+`8abd32832159c6ac1148c926b7276f35ba34582c444e559dce1f1253fea42ef8`，与官方 Hugging Face
+文件页一致；许可记录为 NVIDIA Open Model License Agreement。项目 WSL `clinical-asr` / NeMo
+3.1.0 快照成功恢复为 `SortformerEncLabelModel`，采样率 16 kHz，最大 4 speaker。首次 CPU
+冷恢复约 105 秒；实际 GPU pilot 在文件系统缓存后恢复为 11.230 秒。模型权重仍位于 Git 忽略
+目录，不提交或重新分发。
+
+### 实现
+
+新增 `speaker_diarization_record/v1` 与以下入口：
+
+- `src/clinical_asr_robustness/speaker_diarization.py`：解析 Sortformer
+  `start end speaker`、导出 RTTM、保存模型/许可/运行元数据，并按 `dataset + consultation_id`
+  映射 ASR 字词；
+- `scripts/run_sortformer_diarization.py`：整例 16 kHz mono GPU 推理，逐例 JSONL/RTTM 落盘，
+  支持 `--resume`、`--overwrite`、失败记录和可选 ASR 映射；
+- `scripts/map_speaker_diarization_to_asr.py`：在不重复加载 GPU 模型的情况下，把已有
+  diarization 应用到候选增强 ASR；
+- `tests/test_speaker_diarization.py`：覆盖解析、RTTM、近似并列重叠保守留空、字词映射、
+  segment mixed 传播和 JSONL 往返。
+
+映射不使用 reference、自动病历或角色文本。普通字词按累计最大重叠 speaker 赋值；最大覆盖低于
+10% 时留空，第二名重叠达到第一名的 90% 时标记 `ambiguous_overlap` 并留空。每个字词记录候选
+speaker 重叠时长、覆盖比例、时间 offset 和模型来源。声学 speaker 与语义 role 保持分离。
+
+### 1 例真实工程运行
+
+用 `preprocess_asr_audio.py --window-sec 0` 把工程阶段最短整例确定性转换为 280.704 秒、
+16 kHz mono PCM16 WAV。ASR 与 diarization 顺序运行。最终显式配置为：
+
+- `chunk_len=340`；
+- `chunk_right_context=40`；
+- `fifo_len=40`；
+- `spkcache_update_period=340`；
+- `spkcache_len=188`；
+- `batch_size=1`。
+
+模型卡示例的 `spkcache_update_period=300` 在当前 NeMo 中会因小于 `chunk_len` 被自动提升为
+340；正式复跑已显式改成 340，保证记录与实际一致。固定配置结果：1/1 成功，推理 2.180 秒，
+RTF 0.00777，CUDA 峰值 allocated/reserved 为 689.81/750.00 MiB。输出 97 个声学区间和
+`speaker_0...speaker_3` 四个标签；活动时长分别为 112.24、27.04、24.88、0.48 秒。不同
+speaker 区间允许重叠，不能把活动时长直接相加。`speaker_3` 极短且没有映射到候选增强 ASR
+字词，可能是真实短时第三方、重叠或伪检出，需人工回听/RTTM 判断。
+
+候选增强后的 10 个 ASR 窗口共有 726 个字词单元：681 个 `mapped_max_overlap`、18 个
+`ambiguous_overlap`、25 个 `no_overlap`、2 个 `missing_timestamp`，覆盖 93.80%。病例级审阅包
+仍是一行一例，内部保留 10 个窗口，产生 89 个 speaker turns；681 个字词进入
+`speaker_0/1/2`，45 个保留 `speaker_unknown`，故 `diarization_status=partial`。这只表示工程
+映射覆盖，不是准确率。
+
+主要产物位于 `outputs/remote_programming_40/t070_sortformer_pilot/`：diarization JSONL、
+RTTM、候选增强 + speaker ASR、window/conversation 审阅 JSONL、CSV、交互 HTML 和三个运行
+摘要。所有音频、转写和页面仍位于 Git 忽略目录。
+
+### 验证与边界
+
+- 新增测试：4 passed；
+- 整仓测试：101 passed；
+- `ruff check .`：通过；
+- 交互 HTML 的 2 个内联 JavaScript 块通过 Node 语法解析；
+- Browser runtime 可初始化，但浏览器列表为空，未进行真实点击、回听、本地恢复或反馈下载；
+- 没有人工 RTTM/reference，不报告 DER/JER、speaker 准确率或质量提升。
+
+详细配置、指标、产物和下一步见 `docs/t070_sortformer_diarization_pilot.md`。下一步扩到 5 例，
+重点检查极短 speaker、超过 4 人、中文/中英混说、重叠歧义、失败恢复和人工可用性；必要时接
+VAD + TitaNet + clustering 回退。未通过 5 例门槛前不跑 40 例。
+
+## 2026-07-15：T070 同一说话人短空洞桥接与审阅分段收敛
+
+用户反馈病例级页面仍出现“说话人待分离”把同一人的连续话语切成多段。对首例只统计标签、
+时间戳和相邻关系，不读取或记录对话正文：45 个未映射字词组成 32 个连续空洞，其中 19 个
+空洞前后是同一声学 speaker；14 个短空洞满足 1.5 秒阈值和安全状态约束。
+
+`speaker_diarization.py` 新增 `same_speaker_short_gap_bridge/v1`。规则仅在未映射 run 前后标签
+相同、两侧间隔不超过 1.5 秒，且 run 中所有原始状态均为 `no_overlap` 或
+`insufficient_overlap` 时回填展示标签。`ambiguous_overlap`、不同 speaker 交界、长静音、
+缺时间戳和时间倒序均不桥接。word metadata 中原始 acoustic `speaker_label`、
+`mapping_status` 和候选重叠证据保持不变，另存 `resolved_speaker_label`、来源、观察间隔和
+平滑状态；运行摘要分别报告 acoustic coverage 与 resolved coverage，避免把上下文推断伪装成
+模型输出。规则跨 ASR window 生效，但只在同一 `dataset + consultation_id +
+diarization_record_id` 内运行。
+
+两个映射入口均新增 `--max-same-speaker-bridge-gap-sec` 和
+`--disable-same-speaker-gap-bridge`。病例级审阅的 speaker label source 也会保留直接声学映射
+或短空洞桥接来源。首例重新映射后：原始声学覆盖仍为 681/726（93.80%），安全桥接 14 个
+`no_overlap` 单元，展示覆盖为 695/726（95.73%）；没有桥接 18 个重叠歧义。
+`speaker_unknown` 从 33 turns / 45 单元降至 22 turns / 31 单元，完整对话从 89 turns 降至
+67 turns，状态仍为 `partial`。剩余未知项必须人工回听或保留待确认，不能仅为减少碎片而猜测。
+
+新增/更新产物位于 Git 忽略目录 `outputs/remote_programming_40/t070_sortformer_pilot/`，文件名
+带 `_smoothed`，并保留原始未平滑版本作审计对照。针对性测试覆盖同人短空洞、重叠歧义、
+不同 speaker 边界和跨 ASR window 桥接；整仓测试 105 passed，`ruff check .` 通过。
+
+## 2026-07-15：T070 LLM speaker 语义全连接实验
+
+用户进一步要求用大语言模型判断并连接全部残余“待分离”，并授权直接复用项目 `.env`。
+新增 `speaker_semantic_resolution.py` 与 `resolve_speaker_gaps_with_llm.py`：先按完整 consultation
+和 ASR 原顺序聚合未知 run，再把带 `speaker_0/1/2` 标签的完整 noisy ASR 对话与全部 gap
+合并为一次提示。模型只能从本病例已有声学标签中选择，不得创建 doctor/patient 角色、修改
+ASR 文字或输出诊疗解释；响应必须逐 gap 满足严格 JSON schema。脚本支持 prompt-only、缓存、
+重试、默认 0.80 confidence gating，以及显式 `--force-resolve-all` 实验模式。
+
+本轮读取 `.env` 的 `API_KEY` / `BASE_URL` / `MODEL_ID`，实际解析为
+`Qwen3-Coder-Plus` 与 `https://llmapi.paratera.com`；密钥没有输出或写入运行记录。短空洞桥接后
+的 31 个未知字词合并为 20 个连续 gap。一次 API 请求成功返回 20/20 决策：6 个高置信、14 个
+中置信；reason code 为 12 个 `same_sentence_continuation`、4 个 `turn_taking`、1 个
+`question_answer`、3 个 `uncertain_best_guess`。按用户要求的 forced 模式应用后，31/31 字词
+全部有展示 speaker，22 个进入 `speaker_0`、9 个进入 `speaker_1`；完整病例由短空洞版 67
+turns 降为 43 turns，unknown 31→0。
+
+为避免“全连接”掩盖证据边界，31 个字词的原始 acoustic `speaker_label=None` 与 11 个
+`no_overlap`、18 个 `ambiguous_overlap`、2 个 `missing_timestamp` 状态均未改写；最终来源严格
+分成 681 个 `nvidia_sortformer_time_overlap/v1`、14 个
+`same_speaker_short_gap_bridge/v1`、31 个 `llm_semantic_speaker_resolution/v1`。conversation
+状态不是声学 `complete`，而是 `semantic_complete`；HTML speaker 标签显示“含语义补全”，并
+提示这不是声纹真值。该版本仅用于实验展示和人工回听优先级，不得作为 speaker reference、
+DER/JER 输入或声学质量结论。
+
+主要新产物均在 Git 忽略目录 `outputs/remote_programming_40/t070_sortformer_pilot/`：semantic
+ASR JSONL、window/conversation review JSONL、CSV、交互 HTML、prompt、响应缓存和运行摘要。
+新增测试覆盖 prompt gap、强制回写保留声学证据和 confidence gating；整仓测试 108 passed，
+`ruff check .` 通过，最终 HTML 的 2 个内联 JavaScript 块通过 Node 语法解析。下一步在 5 例
+阶段同时保留 acoustic-only、short-gap 和 semantic 三版，并人工回听中低置信及重叠 gap。
+
+## 2026-07-15：T058/T064/T066/T070 中文 5 例代理鲁棒性 pilot
+
+用户要求把已经跑通的中文 1 例流水线继续扩展，并以可展示的图/表作为阶段验收；在暂时没有
+clean transcript 的前提下，允许先选择 5–10 例并用强 LLM 修复 noisy transcript 形成代理
+clean。为避免把自动修复伪装成人工金标准，本轮固定选择 `case_0068`、`case_0057`、
+`case_0040`、`case_0008`、`case_0021` 五例，覆盖 4.7–37.9 分钟、预期 K=2/4/5/6、短长音频
+与中英混说信号；所有 proxy 记录显式保存未听音频、非人工、非医生确认、非 gold 和不可正式
+质量声称标志。
+
+首先优化 `preprocess_asr_audio.py`：旧实现对每个 30 秒窗口重新打开并 seek MP3，批处理性能
+很差；现在每个源音频只解码/重采样一次，再从内存确定性切窗。5 例共输出 152 个 16 kHz mono
+PCM16 窗口和 5 个整例 WAV，总实际时长 4,475.627 秒。新增预处理测试覆盖内存切片边界。
+
+Parakeet Hybrid auxiliary-CTC confidence 152/152 成功，产生 9,458 个词/字审阅单元，转写
+84.87 秒、RTF 0.01896、CUDA 峰值 allocated 2.465 GiB。从 Windows 挂载 `.nemo` 的冷恢复
+耗时 1,221.44 秒；复制同 SHA-256 checkpoint 到 WSL 持久缓存后，acoustic 5-best 恢复降为
+35.43 秒，转写 40.45 秒、RTF 0.00904。152/152 窗均有多个去重 beam，共 692 个 beam。
+
+Streaming Sortformer 对 5 个整例 5/5 成功。原始声学 ASR word 时间映射为 8,637/9,458
+（91.32%）；可审计同人短空洞桥接 193 个 word 后，展示覆盖为 8,830/9,458（93.36%），没有
+桥接重叠歧义。无人工 RTTM，因此不报告 DER/JER；其中 K=5/6 病例超过模型最多 4-speaker 输出
+上限，映射率也不是 speaker 准确率。
+
+医学实体 LLM 筛选完成 152/152 窗、152 次 API 请求，181 个输入 mention 中 147 个与 ASR
+对齐，形成 340 个医学 word 和 73 个黄/红医学 span。病例级审阅包包含 5 例、1,059 turns、
+green/yellow/red=6,620/1,892/946；交互 HTML 支持接受 ASR、选择候选、手工编辑、拒绝、无法
+判断、本地恢复和 JSONL 下载。acoustic 5-best 只为 11/73 个 span 提供局部候选；本轮没有对
+125 个不确定词逐一发起完整对话 LLM 候选请求，不能声称 5 例候选覆盖已经充分。Codex in-app
+browser runtime 连续初始化超时，静态 HTML/SVG 结构与文件完整性已检查，但真实点击、回听和
+下载回放仍未验收。
+
+新增 `build_chinese_proxy_references.py`，每例融合推荐 speaker/source 转录、医学先验
+Qwen3-ASR 与医学先验 Paraformer，由强 LLM 保守生成 5/5 代理参考、代理关键事实、证据词和
+不确定项。新增 `attach_proxy_references_to_asr.py` 把病例级 proxy 指针附到 152 个窗口，并修复
+病例摘要 reference bundle 对同一共享路径重复展开的问题。使用同一 LLM、prompt、schema 与
+解码条件完成 5 个 noisy + 5 个 proxy 病例摘要，10/10 成功。病例摘要均标注为研究输出，不
+构成临床建议。
+
+为体现本课题的“病例信息整理与鲁棒性”，新增中文 pilot 评估模块和无第三方依赖的 SVG 图表
+生成器。除 Proxy CER 外，加入：CIPS（医学术语/否定/数字单位/侧别保持加权）、代理事实文本
+召回、黄+红可检测错误召回、审阅字符比例、proxy ECE/Brier、risk-coverage/AURC，以及同一
+病例摘要模型在 noisy/proxy 输入上的事实稳定性。5 例 macro 结果为 Proxy CER 21.2%、CIPS
+88.0%、代理事实文本召回 75.1%、黄+红可检测错误召回 79.5%、审阅字符比例 28.8%、Proxy
+word ECE 0.0510、声学 speaker 映射覆盖 91.0%、病例摘要事实 F1 35.7%、critical fact recall
+33.9%。micro 可检测错误率从 green 3.3% 增至 yellow 19.3% 和 red 50.2%，说明三档风险具有
+清晰排序；摘要稳定性明显更低，显示下游病例整理对转写噪声敏感。
+
+主要展示产物位于 Git 忽略目录
+`outputs/remote_programming_40/t058_pilot5/report/`：逐例 CSV、聚合 JSON、Markdown、汇总
+HTML，以及工程覆盖、代理鲁棒性、颜色错误分层、risk-coverage、下游病例摘要稳定性五张
+SVG。交互页面位于
+同级 `doctor_review_pilot5.html`。完整方法、边界、指标定义和下一步见
+`docs/t058_t066_chinese_pilot5_robustness.md`。本轮通过“5 例工程运行 + 代理探索评估 + 可展示
+图表”门槛，但没有真实人工 confirmed transcript 或人工 reference，不能声称正式质量提升；
+最终整仓 120 tests 通过、`ruff check .` 通过，2 个内联 JavaScript 块通过 Node 语法解析，5 张
+SVG 均通过 XML 结构检查。下一步优先完成 1 例真实浏览器试审和固定 5 例听音频 reference，
+再决定是否扩到 40/40。

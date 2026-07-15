@@ -15,12 +15,14 @@ from clinical_asr_robustness.asr_confidence import (
     UncertainSpan,
 )
 from clinical_asr_robustness.asr_nbest_candidates import (
+    CHINESE_DBS_LLM_CANDIDATE_PROMPT_PROFILE,
     LLM_WORD_AUX_SOURCE,
     MEDICAL_LEXICON_ALIGNMENT_METHOD,
     MEDICAL_LEXICON_AUX_SOURCE,
     SPAN_ALIGNMENT_METHOD,
     align_sequence_candidate_to_span,
     attach_nbest_candidates_to_record,
+    build_llm_conversation_contexts,
     build_llm_word_candidate_prompt_records,
     load_nbest_jsonl,
     nbest_items_for_record,
@@ -332,6 +334,102 @@ def test_llm_word_candidates_target_yellow_red_words_with_context_and_lexicon() 
         ]
         == 2
     )
+
+
+def test_chinese_llm_candidate_prompt_uses_complete_speaker_labeled_conversation() -> None:
+    payload = make_base_record().model_dump(mode="json")
+    payload["dataset"] = "remote_programming_40"
+    payload["sample_id"] = "remote_programming_40:case_demo:mixed:0000"
+    payload["consultation_id"] = "case_demo"
+    payload["source_channel"] = "mixed"
+    payload["asr_transcript"] = "患者左侧震颤加重"
+    payload["asr_words"] = [
+        {
+            "word_index": index,
+            "text": text,
+            "start_sec": index * 0.2,
+            "end_sec": (index + 1) * 0.2,
+            "confidence": 0.42 if index in {4, 5} else 0.96,
+            "char_start": index,
+            "char_end": index + 1,
+            "speaker_label": "spk_1",
+            "metadata": (
+                {
+                    "medical_entity_review": {
+                        "is_medical_entity": True,
+                        "entity_ids": ["ent_001"],
+                    }
+                }
+                if index in {4, 5}
+                else {}
+            ),
+        }
+        for index, text in enumerate("患者左侧震颤加重")
+    ]
+    payload["asr_segments"] = [
+        {
+            "segment_id": "seg_001",
+            "text": "患者左侧震颤加重",
+            "start_word_index": 0,
+            "end_word_index": 8,
+            "start_sec": 0.0,
+            "end_sec": 1.6,
+            "confidence": 0.8,
+            "speaker_label": "spk_1",
+        }
+    ]
+    payload["uncertain_spans"] = [
+        {
+            "span_id": "span_zh_001",
+            "text": "震颤",
+            "start_word_index": 4,
+            "end_word_index": 6,
+            "start_sec": 0.8,
+            "end_sec": 1.2,
+            "mean_confidence": 0.42,
+            "min_confidence": 0.42,
+            "trigger_reason": "medical_entity_low_or_medium_confidence",
+            "metadata": {
+                "medical_entity_ids": ["ent_001"],
+                "medical_entities": [
+                    {"entity_id": "ent_001", "text": "震颤", "entity_type": "symptom"}
+                ],
+            },
+        }
+    ]
+    payload["asr_alternatives"] = []
+    payload["alignment"].update(
+        {
+            "transcript_word_count": 8,
+            "word_timestamp_count": 8,
+            "word_confidence_count": 8,
+            "asr_word_count": 8,
+            "paired_word_count": 8,
+        }
+    )
+    record = ASRConfidenceRecord.model_validate(payload)
+    contexts = build_llm_conversation_contexts([record])
+
+    prompts = build_llm_word_candidate_prompt_records(
+        record,
+        medical_candidate_lexicon={"symptom": ["震颤", "僵硬", "异动"]},
+        context_window_words=5,
+        max_lexicon_terms=5,
+        prompt_profile=CHINESE_DBS_LLM_CANDIDATE_PROMPT_PROFILE,
+        conversation_context=contexts[record.sample_id],
+    )
+
+    assert len(prompts) == 2
+    assert prompts[0].context["window_text"] == "患者左侧震颤加重"
+    assert prompts[0].metadata["context_scope"] == "complete_consultation"
+    assert "[spk_1] 患者左侧震颤加重" in contexts[record.sample_id][
+        "speaker_labeled_transcript"
+    ]
+    system_message = prompts[0].messages[0]["content"]
+    user_message = prompts[0].messages[1]["content"]
+    assert "中文神经调控" in system_message
+    assert "完整病例对话" in user_message
+    assert '"reference_used": false' in user_message
 
 
 def test_load_nbest_jsonl_supports_record_level_and_item_level_formats(tmp_path) -> None:

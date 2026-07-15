@@ -1,177 +1,153 @@
 # 项目 TODO 与当前交接板
 
-更新时间：2026-07-09
+更新时间：2026-07-15
 
-本文档是新对话/新任务的首要入口，只保留“现在该做什么”和必要操作提醒。历史任务流水、早期路线演化、详细产出和失败案例见 `docs/task_records.md`；除非需要追溯决策来源，不要默认完整阅读历史归档。
+本文档只保留当前主线、可执行任务和验收口径。历史任务流水、旧路线、完整验证记录与
+PriMock57 已完成结果见 `docs/task_records.md`；除非需要追溯决策，不要默认完整读取历史归档。
 
-## 维护规则
+## 快速规则
 
-- 工作语言优先使用中文。
-- 开始较大的实现、实验或文档整理前，先读本文件；再按当前任务需要读取 README、专项文档或配置。
-- 完成较完整任务后：
-  - 更新本文件的当前状态、下一步、阻塞/待确认和最近完成；
-  - 在 `docs/task_records.md` 追加较完整记录。
-- 不要记录真实患者隐私、未脱敏病例正文、本地密钥或受限数据细节。
-- Python、pytest、ruff、NeMo、ASR 或实验脚本默认使用 WSL Conda 环境 `clinical-asr`。
+- 当前主线：**音频 → ASR + 说话人分离 → 病例级 speaker turns + noisy transcript +
+  ASR 词/片段级置信度 + n-best/LLM 候选 → 医学实体优先筛选 → 绿/黄/红审阅 →
+  医生/研究者确认 → confirmed transcript →
+  raw/confirmed/reference 下游鲁棒性评估**。
+- 本批中文数据已通过相应审核，可按已批准范围用于外部 LLM、外部 ASR 和原音频处理；
+  仍不得把原始音频、逐例转录、病例正文或可识别信息提交 Git。
+- 包内现有转录和 Qwen 自动病历均是自动产物，不得标为人工 `reference`、真实
+  `confirmed_transcript` 或下游 gold。
+- 所有病例摘要、诊疗/随访计划整理结果必须标注“研究输出，不构成临床建议”。
+- Python、pytest、ruff、NeMo、ASR 和实验脚本默认使用 WSL Conda 环境：
+  `/home/krabs/miniforge3/envs/clinical-asr/bin/python`。
+- 若 Codex 沙箱调用 WSL Python 失败，或误报发行版不存在但 `wsl.exe -l -v` 可见
+  `Ubuntu-22.04`，立即申请提升权限，不反复探索。环境细节见 `docs/wsl_environment.md`。
 
-## 环境速记
+## 当前焦点
 
-推荐直接调用解释器：
+T058/T064/T066/T070：固定中文 5 例 pilot 已完成工程批处理和代理参考探索评估。5/5 例、
+74.60 分钟、152 个 30 秒窗口均完成 auxiliary-CTC confidence 与 acoustic 5-best；5 个整例均
+完成 Streaming Sortformer。原始 speaker 映射覆盖 8,637/9,458（91.32%），同人短空洞桥接后
+展示覆盖 8,830/9,458（93.36%）。病例级页面包含 5 例、1,059 turns 和 73 个黄/红医学 span。
+LLM 多路 ASR 融合代理参考明确不是人工 gold；基于它的探索结果为 Proxy CER 21.2%、CIPS
+88.0%、黄+红可检测错误召回 79.5%、审阅字符比例 28.8%，noisy↔proxy 病例摘要事实 F1
+35.7%。结果和 5 张 SVG 见 `docs/t058_t066_chinese_pilot5_robustness.md`。
 
-```powershell
-wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python
-```
+5 例工程与可展示图表已经完成，但浏览器运行时仍不可用，且没有真实医生反馈、人工
+`confirmed_transcript` 或听音频的独立 reference，因此尚未通过“真实确认闭环/正式质量结论”
+门槛。扩到 40 例前，优先完成至少 1 例真实浏览器试审与 5 例人工 reference。
 
-常用验证：
+当前最先执行：
 
-```powershell
-wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m pytest --basetemp=.pytest_tmp
-wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check .
-```
+1. 在可用浏览器中人工点击 5 例页面，检查 speaker turn、绝对时间回听、候选、编辑、本地恢复
+   和反馈下载；
+2. 由医生/研究者完成 1 例真实试审，再用 T035 确定性生成 confirmed transcript；没有人工
+   操作前，不把测试回放或 LLM 结果称为真实 confirmed transcript；
+3. 为固定 5 例制作听音频的独立人工 reference，优先标注药物、否定、数字单位、侧别、DBS
+   参数和说话人不确定区间；
+4. 在人工 reference 上复算 CER、CIPS、ECE/Brier、risk-coverage 和 top-k/span 候选覆盖；
+5. 上述人工门槛通过后，以 WSL 持久模型缓存和可续跑方式扩到 40/40。
 
-如果 Codex 沙箱中直接调用 WSL Python 出现权限/沙箱相关失败，或出现“发行版不存在”但 `wsl.exe -l -v` 能看到 `Ubuntu-22.04`，不要反复探索；应申请提升权限，建议可复用前缀：
+## 已整合的本地资产
 
-```text
-wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python
-```
+| 资产 | 项目内路径 | 定位 |
+|---|---|---|
+| 40 例原始音频与多路自动转录 | `data/raw/remote_programming_40/远程程控人工复核资料_精选40例_无病历版_20260713/` | 受保护 raw 快照；40 个 MP3、现有自动转录及说明，不提交 Git |
+| 40 份 Qwen 自动病历 | `data/external/remote_programming_40/远程程控精选40例_Qwen病历_20260714_加密/` | `noisy_asr → case_summary` 外部基线/格式参考，不是 gold |
+| 中文/中英混说 Parakeet artifact | `data/external/asr_models/nemo/Parakeet-Hybrid-XL-unified-0.6b_spe7k_zh-en-CN_3.0.nemo` | 已验证为 Hybrid RNNT + auxiliary CTC；约 2.34 GB，不提交 Git |
+| Streaming Sortformer artifact | `data/external/asr_models/nemo/diar_streaming_sortformer_4spk-v2.1.nemo` | 471,367,680 bytes；SHA-256 已与官方值核对；最多 4 个声学 speaker；NVIDIA Open Model License；不提交 Git |
+| 历史英文 NeMo artifact | `data/external/asr_models/nemo/stt_en_fastconformer_ctc_large.nemo` | PriMock57 历史 baseline，不与中文阈值或结果静默混用 |
 
-更多环境细节见 `docs/wsl_environment.md`。
+`data/raw/`、`data/external/`、`data/interim/`、`data/processed/` 和 `outputs/` 已被
+`.gitignore` 忽略。路径、聚合统计和数据定位见
+`docs/remote_programming_40_dataset_assessment.md`。
 
-## 当前主线
+## 中文 40 例完整任务拆分
 
-项目近期主线：
+状态只使用：`待开始`、`进行中`、`已完成`、`阻塞`。一个任务只有在产物和验收项都满足后
+才能标为已完成。
 
-**音频 → ASR → noisy transcript + ASR 词级置信度（可由 CTC frame posterior/log_probs entropy 聚合）+ span/segment 派生风险 → 医学实体优先绿/黄/红高亮 → 医生点击 top-k/n-best 候选并确认 → confirmed transcript → 下游病例信息整理鲁棒性评估。**
+| ID | 优先级 | 状态 | 任务 | 关键产物与验收 |
+|---|---|---|---|---|
+| T051 | P0 | 已完成 | 数据归位与快照冻结 | 40 例匿名 manifest、相对路径、音频格式/时长、683 文件的 SHA-256 清单和聚合 digest 已生成；不含病例正文，产物位于 Git 忽略目录。 |
+| T052 | P0 | 进行中 | checkpoint 与环境核验 | restore-only 已完成：真实类为 `EncDecHybridRNNTCTCBPEModel`，16 kHz、7,000 BPE、aux CTC blank=7000，NeMo/PyTorch/CUDA/GPU 与 digest 已记录；公开发布前仍需补原始下载页/许可证凭据。 |
+| T053 | P0 | 已完成 | 确定性音频预处理 | 已实现 MP3 → 16 kHz mono PCM16 连续短窗、SHA-256、稳定 unit 和原 MP3 绝对时间；最短/典型/最长首窗及最短整例 10 窗 QC 通过。VAD 可在 5 例阶段作为可选优化加入。 |
+| T054 | P0 | 进行中 | 1 例 Parakeet ASR smoke test | 30 秒与最短整例均成功；10/10 窗、726 单元、字符/绝对时间错误 0，confidence RTF 0.0491、峰值 2.465 GiB，5-best RTF 0.0105。待补独立 `am_raw`/margin/稀疏 frame top-k 视图后再关闭。 |
+| T055 | P0 | 进行中 | 中文 ASR adapter 与稳定 schema | 数据集/checkpoint、Hybrid auxiliary CTC、`unit_id`、字符偏移、原分隔符、绝对时间和右向左反馈回放已接入共用 schema；待补 `am_raw/decoded_with_lm/display_itn` 三层及 transform log。 |
+| T056 | P0 | 已完成 | ASR 词/片段置信度与三档风险 | auxiliary CTC frame distribution 已聚合到中文审阅单元；`demo_quantile_v0` 已实现并明确 `calibrated=false`，最短整例 green/yellow/red=507/146/73。 |
+| T057 | P0 | 进行中 | n-best/top-k 局部候选 | acoustic auxiliary-CTC 5-best 和字符区间 span 对齐已贯通，整例每窗 3–5 个去重 beam，医学待审 span 获得 1 个局部差异候选；待接 4-gram LM 和稀疏 frame top-k 证据。 |
+| T058 | P0 | 已完成 | 1 → 5 例 ASR pilot | 固定 5 例覆盖 4.7–37.9 分钟、K=2/4/5/6 与中英混说信号；152/152 窗完成 confidence 和多 beam 5-best，5/5 完成整例 diarization。ASR confidence RTF 0.01896、峰值 allocated 2.465 GiB；运行表、CSV、Markdown 和 5 张 SVG 已生成。 |
+| T059 | P0 | 进行中 | 医学实体优先筛选 | 5 例 152/152 窗完成 LLM 实体筛选：181 个输入 mention、147 个对齐、340 个医学 word、73 个黄/红医学 span；代理 CIPS 已覆盖医学词、否定、数字单位和侧别，但仍待人工 reference 核验 recall/precision。 |
+| T060 | P0 | 进行中 | 中文审阅界面与反馈回放 | 5 例页面已生成：1,059 turns、73 个待审 span，支持接受、候选选择、手工编辑、拒绝、无法判断、本地恢复和 JSONL 导出；静态结构检查通过。in-app browser 初始化超时，尚缺真实点击、回听、下载和 T035 反馈回放验收。 |
+| T061 | P0 | 待开始 | 40 例全量 ASR 与可展示运行总览 | 按可恢复、可续跑方式完成 40/40；输出标准化 JSONL、失败/重试表、运行配置和聚合 Markdown/CSV；制作“样本覆盖与成功率”“时长/RTF”“峰值显存”“风险颜色分布”图表。若本地 8 GB 无法稳定运行，记录证据后启用明确标源的回退后端。 |
+| T062 | P0 | 待开始 | 医生/研究者确认与 confirmed transcript | 先 1 例、再 5 例试审，修订操作说明后扩量；保存每次选择、编辑、拒绝、无法判断、回听次数、耗时、候选来源和最终文本。输出审阅成本表、动作分布图、修改类型图；明确区分真实人工确认与 LLM 模拟审阅。 |
+| T063 | P1 | 进行中 | 人工 reference 与标注协议 | 已生成 5 例 `llm_multi_asr_consensus_proxy` 用于探索链路，记录明确为未听音频、非人工、非 gold、不可正式声称质量；它不完成本任务。下一步仍需制定并执行逐字/时间戳、speaker role、听不清、否定、药名、数字单位、DBS 参数及双人仲裁规范。 |
+| T064 | P1 | 进行中 | ASR、置信度与候选评估 | 已在 5 例代理参考上跑通 CER、CIPS、代理事实召回、ECE/Brier、AURC/risk-coverage 和三档错误率；Proxy CER 21.2%，CIPS 88.0%，yellow+red 可检测错误召回 79.5%。正式 reference、top-k oracle、配对 CI 和失败案例人工复核仍缺。 |
+| T065 | P1 | 待开始 | 下游统一输入与 gold facts | 对同一病例对齐 `raw_asr`、真实 `confirmed_transcript`、`clean_reference`；由独立标注流程建立症状抽取、病例摘要和诊疗/随访计划 gold facts。Qwen 自动病历只作外部 baseline，不参与 gold 构造。 |
+| T066 | P1 | 进行中 | raw/confirmed/reference 下游鲁棒性评估 | 5 例 noisy/proxy 使用同一 LLM、prompt、schema 与解码参数完成 10/10 病例摘要；同字段事实 F1 35.7%、critical fact recall 33.9%，显示下游噪声敏感性。尚无真实 confirmed、人工 reference/gold、unsupported/contradicted 与配对 CI，不能作正式质量结论。 |
+| T067 | P1 | 进行中 | 最终图表、演示与报告 | 5 例 pilot 已输出 CSV/Markdown/run JSON、交互 HTML 和 5 张 SVG（工程覆盖、代理鲁棒性、颜色错误分层、risk-coverage、下游摘要稳定性）。最终版仍需真实 confirmed/reference、top-k、审阅成本收益、错误类型与人工失败案例。 |
+| T068 | P0 | 已完成 | 病例级完整对话审阅协议 | 新增 `asr_review_conversation/v1`、speaker turn/slice schema 和 JSONL；HTML 按 `consultation_id` 聚合，内部 30 秒窗口不再作为一级对话导航；无 diarization 时显式 `speaker_unknown`。 |
+| T069 | P0 | 进行中 | 中文完整对话 LLM 候选 | 首例完整对话 LLM 候选路径已验证。5 例 acoustic 5-best 共 692 个 beam，但只为 11/73 个医学 span 提供局部差异候选；本轮未发起 125 次全上下文候选 API 请求。待评估 LLM 候选的增量覆盖、重复/过度推断和人工可用率。 |
+| T070 | P0 | 进行中 | NVIDIA 说话人分离 pilot | 已扩到固定 5 例并 5/5 成功；原始 ASR word 映射 8,637/9,458（91.32%），同人短空洞桥接 193 word 后展示覆盖 8,830/9,458（93.36%），未桥接重叠歧义。无人工 RTTM，不报告 DER/JER；K=5/6 超过模型 4-speaker 上限，仍待人工回听与聚类回退判断。 |
 
-2026-07-01 起，置信度主要放在 ASR 输出层；文本 repair、LLM/规则候选和反馈微调只作为后续辅助扩展。
+## 阶段门槛与扩量规则
 
-2026-07-07 起，审阅逻辑改为 **医学实体优先**：先用 LLM 从 ASR transcript 中识别疾病、症状、药物、检查等医学实体；只有医学实体词保留置信度颜色并进入候选/反馈流程，非医学词作为普通黑字上下文显示。详见 `docs/t038_medical_entity_review.md`。
+- `1 例门槛`：checkpoint 可恢复；15–30 秒和整例能转写；绝对时间可回放；中文往返无空格
+  损坏；能导出风险信号和至少 sequence-level n-best（候选允许无局部差异）。
+- `5 例门槛`：无静默截断；失败可重跑；显存/RTF 可接受；实体边界、候选、页面、反馈和
+  confirmed transcript 形成闭环。未通过前不跑 40 例。
+- `40 例工程完成`：40/40 均有标准化 ASR 记录或明确的失败/回退记录，运行配置可追溯，
+  页面可审阅并能确定性生成 confirmed transcript。
+- `质量结论门槛`：只有独立人工 reference/gold、真实人工 confirmed transcript 和预先声明
+  的评估子集齐备后，才可声称 ASR、确认流程或下游质量得到提升。
 
-当前可运行链路：
+## 当前风险与阻塞
 
-```text
-T028/T043 ASR word confidence
-  → T038 医学实体 gating
-  → T029 n-best/top-k 候选
-  → T030/T036 审阅样本与 HTML demo
-  → T035 confirmed_transcript
-  → T040 raw/confirmed/reference 下游指标看板
-  → T041 noisy ASR → 病例摘要生成 V0
-```
-
-日常复跑入口已收敛为 `scripts/run_asr_review_pipeline.py`；默认复用已有 T028/T037 输出并自动生成 `outputs/primock57/t036_doctor_review_demo/doctor_review_demo.html`。
-
-截至 T041，第一周目标中的“音频数据 → ASR → noisy transcript + 置信度 → 医学实体优先医生交互选择 + 交互界面设计 + ASR 输出层初评/闭环记录 → confirmed/downstream 初评”已有可运行骨架。T040 已补上 raw ASR / confirmed / reference 的第一版全流程效果看板；T041 已把 noisy ASR 接到病例摘要下游任务，并已用 `--run-llm` 生成第一版 consultation-level 结构化病例摘要。当前 confirmed 仍来自 simulated accept_asr，尚不能代表真实医生确认质量。
-
-2026-07-08 调研确认：当前候选覆盖极窄主要是方案/策略导致，而不是 n-best 文件没读到。T038 会先把待审阅范围从全部黄/红词收缩到“非 green 医学实体”，T029 又只在 sequence-level beam 与这些 span 局部发生差异时生成 span 候选；当前 3 条 record 中 T028 原始低/中置信 span 为 108 个，T038 后只剩 3 个医学实体待审 span，T037 虽有 15 个 sequence 候选，但 T029 span 候选为 0。T039 已完成第一版候选覆盖改进。2026-07-09 新增 T043：在不训练模型、不替换 NeMo FastConformer-CTC 主干的前提下，支持保存/读取 frame-level log_probs/posterior，并按 CTC entropy pipeline 聚合到 word-level confidence；下一步 P0 转向真实样本复跑、医生审阅流程/确认成本指标。
-
-## 当前焦点与下一步
-
-| 优先级 | 任务编号 | 状态 | 下一步/验收标准 |
-|---|---|---|---|
-| P0 | T043 | 已完成/待实跑 | 已新增 CTC frame posterior/log_probs → frame entropy/max-prob confidence → token confidence → word confidence 的项目侧流水线；T028 可用 `--word-confidence-source ctc_frame_distribution --save-frame-distributions` 从 NeMo Hypothesis frame log_probs 重算 `asr_words[].confidence`，并保存 `.npz` artifact。下一步用真实 PriMock57 样本实跑，检查 `word_alignment_status_counts` 是否主要为 `aligned`，再复跑 T038/T029/T036/T031 对比医学 span 风险定位变化。详见 `docs/t043_ctc_word_confidence.md`。 |
-| P0 | T039 | 已完成 | 已新增医学词表/模糊匹配辅助候选：ASR n-best 仍作为原生候选保留；无 ASR span candidate 的医学实体待审 span 会补充 `source="medical_lexicon_aux_candidate"` 的辅助候选，并在 metadata 中标注 `generated_by="T039"`、`reference_used=false`。本轮 T029/T030 显示 spans_with_candidates 从 0/3 提升到 3/3；T031 exact reference coverage 仍为 0/3，说明候选可用性改善但正确性仍需后续优化。详见 `docs/t039_candidate_coverage_improvement.md`。 |
-| P0 | T044 | 已完成/待实跑 | 已新增黄/红词级 LLM 候选逻辑：词级置信度、颜色阈值和 T038 医学实体 gating 不变；T029 默认导出 prompt-ready JSONL，显式 `--run-llm-candidates` 时调用 OpenAI-compatible LLM。每个 prompt 包含目标词、局部上下文窗口和医学词表参考，返回约 3 个 `scope="word"` 候选，并在 metadata 标注 `generated_by="T044"`、`source="llm_word_candidate"`、`reference_used=false`。下一步需用真实 PriMock57 样本实跑，人工检查候选正确性、延迟和医生选择/编辑成本。 |
-| P0 | T019/T023 | 进行中 | T040 已统计第一版 review cost；下一步需要导出真实研究者/医生反馈，区分真实医生、研究者和模拟审阅者反馈，并把候选来源、accept_asr/select_alternative/manual_edit/reject/unable_to_judge 的操作成本纳入报告。 |
-| P1 | T041/T040/T007/T008 | 已生成 V0 摘要 | 已接入 V0 医学概念 token 抽取 precision/recall/F1，并用 `--run-llm` 基于 noisy ASR 生成 2 条 consultation-level 结构化病例摘要；下一步设计 noisy/confirmed/reference 的病例摘要信息保持评估，并人工审核字段遗漏、幻觉和 ASR 噪声导致的错误。 |
-| P1 | T042 | 待实现 | 建立病例摘要质量评估：以 reference transcript/人工 key facts 为 gold，对 noisy/confirmed/reference 三类输入生成摘要，计算字段级信息保持、unsupported/contradicted facts、否定/药物/计划错误、结构合规和人工审核成本。 |
-| P0 | T040 follow-up | 待办 | 从 HTML demo 导出一份真实研究者反馈，不再全部 accept_asr；用 T035 生成新的 confirmed transcript 后复跑 T040，观察 WER/MC-WER/F1 改善和 manual_edit 成本。 |
-| P1 | T038 follow-up | 待优化 | 用 T031/T039/T040 结果回看医学实体误报与漏报；当前仍有疑似过宽/误报实体进入待审 span，需继续优化 entity postprocess 和高价值 green 医学实体点击检查策略。 |
-| P3 | T006/T018 | 暂缓 | 文本 repair 扩展；仅在 ASR top-k 不足时作为辅助候选生成。 |
-
-T039 本轮完成情况：
-
-1. 保留 T029 sequence-level ASR n-best 与 span diff 逻辑，不改变 `nemo_beam` 等 ASR-native source 的含义。
-2. 新增 T039 医学词表/模糊候选兜底，仅对“医学实体待审 span 且无 ASR-native span candidate”的情况生效。
-3. 新增 `configs/medical_candidate_lexicon.example.json`；后续可按数据集扩展症状、药物、解剖部位、检查、否定相关短语等候选词表。
-4. T029 run summary 新增 `span_alternatives_by_source`、`spans_with_alternatives_by_source`；T031 summary 新增 source-level exact coverage。
-5. 本轮复跑结果：T029/T030 spans_with_candidates = 3/3；T031 exact reference coverage = 0/3，提示辅助候选不能替代医生编辑/拒绝/无法判断。
-
-
-T044 本轮完成情况：
-
-1. 保持 `asr_words[].confidence`、`confidence_level`、T038 医学实体 gating 和绿/黄/红显示逻辑不变。
-2. 新增 T044 词级 LLM 候选：只为待审 span 内 `yellow`/`red` 的目标词构造 prompt；prompt 明确包含当前目标词、适量局部上下文和医学词表参考。
-3. T029 默认导出 `primock57_llm_word_candidate_prompts.jsonl` 作为 prompt-ready 记录；只有显式传入 `--run-llm-candidates` 才实际访问外部 OpenAI-compatible API。
-4. LLM 返回候选写入 `scope="word"` 的 `asr_alternatives`，并回填到所属 `uncertain_spans[].alternative_ids`；T035 回放已支持 word-level 候选只替换 span 内目标词。
-5. 验证：`pytest --basetemp=.pytest_tmp` 62 passed；targeted `ruff check` 通过；T029 和一键 pipeline 的 `--help` 均正常。
-
-已完成主干压缩索引：T025/T026/T027/T028/T029/T030/T031/T032/T035/T036/T037/T038/T039/T040/T041/T043/T044 均已完成或已启动 V0；详细产出、验证命令和历史细节见 docs/task_records.md。
-
-## T042 病例摘要质量评估方案（待实现）
-
-目标：判断 T041 生成摘要是否真的保留病例信息，而不是只看语言是否通顺。V0 评估以 reference transcript 或人工 key facts 为 gold，对 noisy ASR、confirmed transcript、reference transcript 三类输入分别生成摘要，比较质量差异和 confirmed transcript 带来的收益。
-
-推荐指标：
-
-- 结构合规：JSON 可解析率、必需字段存在率、字段类型正确率、是否只输出研究用摘要。
-- 字段级信息保持：按 `chief_complaint`、`history_of_present_illness`、`symptoms`、`negated_or_absent_symptoms`、`relevant_history`、`medications`、`tests_or_exam_mentioned`、`assessment_mentioned`、`plan_mentioned` 建 gold key facts，计算 precision / recall / F1；重点单列症状、否定症状、药物、检查、assessment、plan。
-- 事实一致性：把摘要拆成 atomic claims，标注 supported / unsupported / contradicted / unclear，报告 unsupported fact rate、contradiction rate、hallucination count per case。
-- 临床高风险错误：单列否定词错误、药名/剂量/用法错误、诊疗计划越界、说话人归因错误、把不确定检查或诊断写实等；报告 safety-critical error count。
-- 鲁棒性收益：比较 `score_confirmed - score_noisy`、`score_reference - score_noisy`，可用 gap closure = `(confirmed - noisy) / (reference - noisy)`；若当前 confirmed 仍是 simulated accept_asr，预期收益应接近 0。
-- 不确定性质量：检查 `uncertainty_notes` 是否覆盖 ASR 噪声、低置信 span 和含糊医学术语；统计应标未标/误标不确定性。
-- 人工审核成本：记录每条摘要需修改字段数、人工编辑字数、审核时间、严重错误数；用于评估医生/研究者确认后的下游收益是否值得。
-
-V0 评测流程：
-
-1. 从 T041 records 抽取 `case_summary`，不把完整 transcript 写入公开文档。
-2. 基于 clean/reference transcript 人工建立每个 consultation 的 gold key facts 表；字段包括症状、否定症状、药物/治疗、检查、诊断倾向、计划、相关病史/社会史。
-3. 将生成摘要拆成 atomic claims，人工或 LLM-assisted 初标后人工复核：supported / unsupported / contradicted / unclear，并标严重程度 minor/major/safety-critical。
-4. 先对当前 2 条 noisy ASR 摘要做人工 pilot，重点核查已发现的疑点：`止泻药` 是否为计划越界，`皮肤检查显示皮疹` 是否把不确定检查写实。
-5. 生成 confirmed/reference 两套摘要后复跑同一评测，输出 summary JSON/CSV：字段级 P/R/F1、unsupported/contradicted facts、关键错误类型、审核成本和 robustness gain。
-6. 扩展到更多 PriMock57 样本后，至少双人标注一小批，报告一致性；最终论文中同时报告自动指标和人工 error taxonomy。
-
-阶段验收标准：先完成 2 条样本的 gold key facts 与人工审核表；实现 `scripts/evaluate_case_summaries.py` 后输出可复跑的 `outputs/primock57/t042_case_summary_evaluation/` 报告。V0 不把 ROUGE/BLEU 作为主指标，只可作为附录参考。
-
-## 阻塞/待确认
-
-- 当前无 ASR/n-best 读写层阻塞；T039 已完成医学实体辅助候选兜底。T043 已实现 CTC frame-derived word confidence，但尚未对真实 PriMock57 音频复跑，下一步需检查 token→word 对齐状态、artifact 体积和医学实体待审 span 分布。新的主要风险是：辅助候选可用性已提升，但 exact reference coverage 仍为 0/3，且 T038 仍有疑似实体误报/过宽 span，需要后续优化实体 gating 与医生操作成本指标。
-- T044 LLM 候选真实调用仍需项目 `.env` 或环境变量提供 API 配置；不得把 API key 写入代码、文档、运行记录或 Git。LLM 候选是 ASR 审阅辅助，不是 ASR 原生 n-best/top-k，也不代表医学正确答案。
-- T040 本轮使用 T035 simulated `accept_asr` confirmed transcript 作为基线：raw ASR → confirmed 的 WER/MC-WER/医学概念 F1 改善均为 0，只代表评估链路可运行，不代表真实医生确认或质量改善。
-- T041 已实际调用 LLM 生成第一版病例摘要，`status_counts={"generated": 2}`；`records.jsonl` 仍包含完整 noisy ASR transcript、prompt 和模型输出，默认只放在 `outputs/`，不要提交 Git 或写入公开文档。当前摘要仅来自 noisy ASR，尚未完成 noisy/confirmed/reference 对照评估。
-- T038 真实 LLM 抽取需要项目根目录 `.env` 或环境变量提供 `API_KEY`/`BASE_URL`/`MODEL_ID` 或 `PARATERA_*`；不要把 API key 写入代码、文档正文、运行记录或 Git。
-- T031 初评显示 yellow 错误率明显高于 green，但 green 仍有错误；当前阈值仍不能视作临床级校准结果。
-- T039/T044 后候选可用性已提升：T039 提供 span-level 词表/模糊兜底，T044 提供 yellow/red word-level LLM 候选；但这些辅助候选仍不能视作正确答案，必须保留 manual_edit/reject/unable_to_judge 并做真实样本质量评估。
-- T035/T036 第一版可由研究者或模拟审阅者操作，不要求真实医生参与；界面输出是研究 demo，不构成临床建议。
-- PriMock57 本地数据、processed 输出和 ASR 结果默认不提交 Git；不要写入未脱敏正文或隐私信息。
-- 后续脚本不得依赖外部 `D:\...\Speech-main`；只能使用 project 内 `third_party/speech_main/` 和 `data/external/asr_models/nemo/`。
-- DISPLACE-M 仍是后续扩展数据集，接入前需确认许可、注册要求和字段结构。
-- T040 已接入 V0 医学概念 token 抽取 F1；它是可复跑代理指标，不等同于最终症状/药物/检查实体抽取或病例摘要质量评估。
+- checkpoint 已确认是 Hybrid RNNT + auxiliary CTC；当前置信度和 beam 明确走 auxiliary CTC，
+  不能把结果写成 RNNT 原生 confidence，也不能把 acoustic beam 写成已接 4-gram LM。
+- RTX 4060 Laptop 8 GB 可能无法让 0.6B 模型、LM、ITN、VAD、diarization 同卡常驻；首轮
+  仅跑直接 NeMo + 短段，逐组件接入。
+- LM、标点和 ITN 会改变文字与偏移；数字、剂量、频率、电压/电流等不得无映射继承 raw
+  token confidence。
+- 包内多路文本不是同一解码器的 top-k；现有“推荐转录”角色也不是 speaker/role gold。
+- NVIDIA Sortformer 是独立 artifact，不在当前 Parakeet ASR `.nemo` 内；本地已取得并跑通
+  Streaming Sortformer v2.1。模型最多 4 speaker 输出，首例还出现仅 0.48 秒且未映射到 ASR
+  word 的 `speaker_3`，需人工回听判定真 speaker/重叠/伪检出；2–6 人病例仍需准备
+  VAD+TitaNet+clustering 回退，并把 acoustic speaker 与 doctor/patient/family/staff role 分开。
+- LLM speaker 语义补全只利用 noisy ASR 的轮次和语义，无法识别声纹或可靠处理重叠说话；
+  强制全连接版必须保留 `semantic_complete`/confidence/reason code 标记，不得当作人工 speaker
+  reference、DER/JER 输入或声学准确率结果。首例 20 gaps 中仅 6 个高置信、3 个明确为
+  `uncertain_best_guess`，5 例阶段必须抽样回听。
+- 当前没有独立人工 reference 与下游 gold；这不阻塞工程闭环，但阻塞正式质量结论。
+- 5 例 LLM 多路转录代理参考没有听原音频，可能继承多路 ASR 的共同错误；Proxy CER、CIPS、
+  ECE/Brier、risk-coverage 和病例摘要稳定性只用于探索性展示，不得替代人工 reference 结果。
+- 5 例 acoustic beam 只覆盖 11/73 个医学待审 span；其余 span 依赖手工编辑/拒绝/无法判断。
+  首例已验证 LLM 候选路径，但 5 例尚未证明候选覆盖或人工可用率。
 
 ## 最近完成
 
 | 日期 | 任务 | 摘要 |
 |---|---|---|
-| 2026-07-09 | T044 黄/红词级 LLM 候选逻辑 | 保持词级置信度与 T038 gating 不变，新增基于目标词、局部上下文和医学词表参考的 LLM 候选生成；T029 默认导出 prompt-ready JSONL，`--run-llm-candidates` 时调用 OpenAI-compatible API，写入 `scope="word"` 候选；T035 回放支持只替换目标词。验证：全量 `pytest --basetemp=.pytest_tmp` 62 passed，targeted `ruff check` 通过。 |
-| 2026-07-09 | T043 CTC posterior/entropy 词级置信度流水线 | 新增 `src/clinical_asr_robustness/ctc_word_confidence.py`，支持从 CTC frame logits/log_probs/posterior 计算 entropy/max-prob frame confidence，经 CTC token collapse 与 BPE word span 聚合成 `asr_words[].confidence`；T028 新增 `--word-confidence-source ctc_frame_distribution` 与 `--save-frame-distributions`，可保存 `.npz` frame artifact；验证目标测试 9 passed、targeted `ruff check` 通过。 |
-| 2026-07-08 | T042 病例摘要质量评估方案入 TODO | 明确摘要质量不以通顺度或 ROUGE/BLEU 为主，而以字段级信息保持、事实一致性、临床高风险错误、uncertainty notes、noisy/confirmed/reference 鲁棒性收益和人工审核成本为核心；下一步实现 gold key facts 表和 `scripts/evaluate_case_summaries.py`。 |
-| 2026-07-08 | T041 `--run-llm` 生成第一版病例摘要 | 使用 `.env` 中 OpenAI-compatible API 配置运行 `scripts/generate_case_summaries.py --run-llm`，基于 noisy ASR 生成 2 条 consultation-level 结构化病例摘要，模型记录为 `Qwen3-Coder-Plus`，summary 中 `status_counts={"generated": 2}`。本轮仅生成 noisy ASR 摘要，尚未做 confirmed/reference 对照和质量评估。 |
-| 2026-07-08 | T041 noisy ASR → 病例摘要生成下游任务 | 新增 `src/clinical_asr_robustness/case_summary_generation.py`、`scripts/generate_case_summaries.py` 和测试；默认按 `consultation_id` 合并 doctor/patient 分声道 noisy ASR，生成病例摘要 prompt-ready JSONL，支持后续 `--run-llm` 调用 OpenAI-compatible API。本轮 dry-run 生成 2 个 consultation-level input units、覆盖 3 条 ASR record；新增 `docs/t041_case_summary_generation.md`。 |
-| 2026-07-08 | T040 confirmed transcript 与下游鲁棒性评估 | 新增 `src/clinical_asr_robustness/confirmed_downstream_evaluation.py`、`scripts/evaluate_confirmed_downstream.py` 和测试；比较 raw ASR / confirmed / reference 的 WER、MC-WER、V0 医学概念 token 抽取 precision/recall/F1，并统计 review cost。当前 simulated accept_asr 基线 raw→confirmed 改善为 0；新增 `docs/t040_confirmed_downstream_evaluation.md`。 |
-| 2026-07-08 | T039 医学实体辅助候选覆盖改进 | 新增医学词表/模糊匹配辅助候选兜底；默认在 T029 中启用，且只对无 ASR-native span candidate 的医学实体待审 span 生效。复跑 T029/T030 后 spans_with_candidates 从 0/3 提升到 3/3；T031 exact reference coverage 仍为 0/3；新增 `docs/t039_candidate_coverage_improvement.md`，验证 `pytest` 47 passed、`ruff check .` 通过。 |
-| 2026-07-08 | T039 候选覆盖问题调研与方案选定 | 诊断候选覆盖窄的主因：T038 医学实体 gating 将 T028 原始 108 个低/中置信 span 收缩为 3 个非 green 医学实体 span；T029 只把 sequence-level n-best 中与 span 局部发生差异的 beam 裁成 span 候选，因此 15 个 sequence 候选最终 0 个 span 候选。选定 T039：保留 ASR n-best 为原生候选，新增医学词表/模糊匹配/可选 LLM 辅助候选兜底，并明确标注来源。 |
-| 2026-07-07 | T032 ASR 输出层最小闭环实验记录 | 新增 `docs/t032_asr_output_min_loop.md`；汇总 T028→T037→T038→T029→T030/T036→T035→T031 的输入、输出、指标和局限；用 3 条模拟 `accept_asr` 反馈跑通 T035，生成 confirmed transcript run summary；修复 T035 反馈 JSONL 读取 UTF-8 BOM 兼容，验证 `tests/test_review_workflow.py` 6 passed、targeted `ruff check` 通过。 |
-| 2026-07-07 | T031 ASR noisy / confidence / top-k 初评 | 新增 `scripts/evaluate_asr_quality.py` 与 `src/clinical_asr_robustness/asr_quality_evaluation.py`；读取 PriMock57 TextGrid reference，对当前 ASR noisy 计算 WER/MC-WER、confidence 分桶错误率、ECE/NCE、医学错误覆盖和 top-k 覆盖；3 条 record 初评 micro WER 0.3405、micro MC-WER 0.2526、yellow 错误率 0.4785、green 错误率 0.1543、span top-k 覆盖 0/3；验证 `pytest` 45 passed、`ruff check .` 通过。 |
-| 2026-07-07 | 新增 ASR 审阅一键流水线入口 | 新增 `scripts/run_asr_review_pipeline.py`，默认复用 T028/T037 并串起 T038→T029→T030→T036 生成最终 HTML；文档补充日常命令、`--run-asr`、`--dry-run`、`--apply-feedback` 等用法；验证默认链路跑通，`ruff check scripts/run_asr_review_pipeline.py` 通过。 |
-| 2026-07-07 | 优化 T038 医学实体后处理与关键词兜底 | 收紧 LLM prompt；在 gating 前裁剪 do/you/mean/your/what/kind/of 等普通词、丢弃非医学误报；新增 diarrhea/pain/vomiting/feverish/temperature/blood/asthma/inhalers/medications/tummy/weak/shaky/stools/fluids/symptoms 等关键词补漏；验证 `ruff check .` 通过，`pytest` 42 passed。 |
-| 2026-07-07 | 重跑 T038→T036 医学实体优先审阅 demo | 修正本地 `.env` 的 `MODEL_ID` 写法后，用 `Qwen3-Coder-Plus` 实际调用 LLM 抽取医学实体，并串起 T038→T029→T030→T036；生成并打开 `outputs/primock57/t036_doctor_review_demo/doctor_review_demo.html`。 |
-| 2026-07-07 | T038 医学实体优先 ASR 审阅范围 gating | 新增 LLM 医学实体抽取、实体到 ASR word 对齐、非医学词黑字显示、医学实体限定候选/反馈流程；验证 `ruff check .` 通过，`pytest` 40 passed。 |
-| 2026-07-07 | 精简 `docs/todo.md` | 将早期冗余任务表、长路线说明和较久完成记录压缩到当前入口；详细记录继续放在 `docs/task_records.md`。 |
-
-更早完成记录见 `docs/task_records.md`。
+| 2026-07-15 | T058/T064/T066/T070 中文 5 例代理鲁棒性 pilot | 固定 5 例 74.60 分钟完成 152/152 confidence 与 5-best、5/5 Sortformer、152/152 医学实体筛选、5 例交互页和 10/10 noisy/proxy 病例摘要。探索结果：Proxy CER 21.2%、CIPS 88.0%、黄+红错误召回 79.5%、审阅字符比例 28.8%、摘要事实 F1 35.7%；输出 CSV/Markdown/run JSON 与 5 张 SVG。代理参考非人工 gold，浏览器真实点击与 confirmed transcript 仍待完成。 |
+| 2026-07-15 | T070 LLM speaker 语义全连接实验 | 新增完整病例级 `semantic_speaker_resolution/v1` 与 `.env` 驱动脚本；一次 `Qwen3-Coder-Plus` 请求严格覆盖首例剩余 20/20 gaps、31/31 字词，unknown 31→0、turns 67→43，状态单列为 `semantic_complete`。6 个高置信、14 个中置信、3 个 `uncertain_best_guess`；原 acoustic 空值/状态全部保留，页面标记“含语义补全”。108 tests/ruff 与 HTML JavaScript 语法通过。 |
+| 2026-07-15 | T070 同一说话人短空洞桥接 | 新增可审计的 `same_speaker_short_gap_bridge/v1`：只桥接前后同 speaker、≤1.5 秒且原状态为 `no_overlap`/`insufficient_overlap` 的空洞，不桥接 `ambiguous_overlap` 或不同 speaker 边界；首例桥接 14 个单元，展示覆盖 95.73%，`speaker_unknown` 45→31，speaker turns 89→67；原始声学覆盖仍单列为 93.80%。105 tests/ruff 通过。 |
+| 2026-07-15 | T070 Streaming Sortformer 1 例接入 | 核验 471,367,680-byte v2.1 `.nemo` 与官方 SHA-256；新增 diarization schema、GPU/恢复运行器、RTTM、独立 ASR 映射器和保守重叠规则；1 例 280.704 秒音频 RTF 0.00777、峰值 reserved 750 MiB，候选 ASR 映射覆盖 93.80%，形成 89 个病例级 turns。101 tests/ruff 与 HTML JavaScript 语法通过；浏览器实例仍不可用。详见 `docs/t070_sortformer_diarization_pilot.md`。 |
+| 2026-07-14 | T068–T070 完整对话、中文候选与 diarization 调研 | 1 例由 10 个窗口聚合为 1 个病例级审阅包；中文完整对话 LLM 候选实际生成 25 个 alternatives，4/4 span 有候选；确认 Sortformer 为独立组件并形成 1→5 例接入方案。97 tests/ruff 通过；浏览器实例仍不可用。详细见 `docs/t068_chinese_conversation_candidates_diarization.md`。 |
+| 2026-07-14 | T051–T060 中文 1 例增量闭环 | 冻结匿名快照、恢复 Hybrid checkpoint、完成确定性短窗与绝对时间、30 秒和最短整例 confidence/5-best、中文实体 gating、候选和医生 HTML；95 tests/ruff 通过。详细见 `docs/t051_t060_chinese_asr_integration.md`。 |
+| 2026-07-14 | T051 本地资产归位 | 将 40 例原始包迁入 `data/raw/remote_programming_40/`，Qwen 自动病历迁入 `data/external/remote_programming_40/`，Parakeet 权重归入 `data/external/asr_models/nemo/`；目录均受 Git 忽略规则保护。 |
+| 2026-07-14 | T050 中文路线与数据盘点 | 完成 40 例聚合盘点、中文 schema 风险分析和 Parakeet 主路线调研；详细记录见专项文档和 `docs/task_records.md`。 |
 
 ## 专项文档入口
 
-- WSL 环境：`docs/wsl_environment.md`
+- 40 例数据盘点与迁移：`docs/remote_programming_40_dataset_assessment.md`
+- 中文 ASR 技术路线：`docs/t050_chinese_asr_flow_research.md`
+- 中文增量实现与 1 例验证：`docs/t051_t060_chinese_asr_integration.md`
+- 完整对话、中文 LLM 候选与说话人分离：`docs/t068_chinese_conversation_candidates_diarization.md`
+- Streaming Sortformer 1 例接入：`docs/t070_sortformer_diarization_pilot.md`
+- 中文 5 例代理鲁棒性 pilot：`docs/t058_t066_chinese_pilot5_robustness.md`
+- WSL/NeMo 环境：`docs/wsl_environment.md`
 - ASR confidence schema：`docs/asr_confidence_schema.md`
-- NeMo confidence 导出：`docs/t028_nemo_confidence_export.md`
-- 医学实体 gating：`docs/t038_medical_entity_review.md`
-- ASR noisy / confidence / top-k 初评：`docs/t031_asr_quality_evaluation.md`
-- ASR 输出层最小闭环实验记录：`docs/t032_asr_output_min_loop.md`。
-- confirmed/downstream 全流程效果看板：`docs/t040_confirmed_downstream_evaluation.md`
-- noisy ASR → 病例摘要生成：`docs/t041_case_summary_generation.md`
-- 候选覆盖改进：`docs/t039_candidate_coverage_improvement.md`
-- ASR n-best 候选：`docs/t029_asr_nbest_candidates.md`
-- CTC posterior/entropy 词级置信度：`docs/t043_ctc_word_confidence.md`
-- 审阅 demo / feedback / confirmed transcript：`docs/t030_t035_t036_review_workflow.md`
-- PriMock57 manifest：`docs/primock57_asr_manifest.md`
+- n-best 候选：`docs/t029_asr_nbest_candidates.md`
+- 医学实体审阅：`docs/t038_medical_entity_review.md`
+- 审阅/feedback/confirmed transcript：`docs/t030_t035_t036_review_workflow.md`
+- 病例信息整理与质量评估：`docs/t041_case_summary_generation.md`、
+  `docs/t042_case_summary_quality_evaluation.md`
+- PriMock57 历史结果与任务流水：`docs/task_records.md`

@@ -106,6 +106,21 @@ top-k / n-best 结果：
 1. noisy transcript 的质量不能只看整体流畅度。当前小样本 micro WER 约 34%，MC-WER 约 25%，已经足以影响下游病例整理。
 2. confidence 分层有信号：yellow 错误率显著高于 green，适合作为医生审阅排序依据。
 3. 但 green 中仍有不少错误，尤其当前没有 red，说明阈值和置信度尺度仍需校准。
+
+## 2026-07-13 三档阈值复核
+
+上表是旧阈值 `green >= 0.80`、`yellow >= 0.50` 的历史结果。使用同一批 3 条
+reference 对齐记录离线比较后，当前选择 `green >= 0.90`、`yellow >= 0.80`：
+
+| level | token count | error count | error rate |
+|---|---:|---:|---:|
+| green | 990 | 77 | 0.0778 |
+| yellow | 805 | 200 | 0.2484 |
+| red | 163 | 78 | 0.4785 |
+
+三档错误率单调上升，且全量分布预计为 51,710 / 19,859 / 4,028 个词，三种颜色
+都有实际作用。这里只完成操作阈值选择；正式 calibration 仍需扩大人工/reference
+对齐样本，并报告 ECE/NCE、风险覆盖率与医生审阅成本。
 4. 当前 top-k 候选覆盖不足，不能指望医生只靠候选点击完成修正；必须保留手动编辑/拒绝/无法判断。
 5. 医学实体 gating 的方向正确，但当前实体识别与 uncertain span 触发规则还需要用 T031 annotation 的 false negative/false positive 继续调。
 

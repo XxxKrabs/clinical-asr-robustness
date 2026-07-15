@@ -1,0 +1,242 @@
+\documentclass[UTF8,a4paper,12pt]{ctexart}
+
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{array}
+
+\geometry{left=2.4cm,right=2.4cm,top=2.4cm,bottom=2.4cm}
+\setlist[itemize]{leftmargin=2em,itemsep=0.25em,topsep=0.25em}
+\setlist[enumerate]{leftmargin=2em,itemsep=0.25em,topsep=0.25em}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\resultFigurePng}{\detokenize{D:/Chasingfordream/内地部分/文书合集/清华大学神经调控/project/outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.png}}
+\newcommand{\resultFigureSvg}{\detokenize{D:/Chasingfordream/内地部分/文书合集/清华大学神经调控/project/outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.svg}}
+\newcommand{\demoHtmlPath}{\detokenize{D:/Chasingfordream/内地部分/文书合集/清华大学神经调控/project/outputs/primock57/t036_doctor_review_demo/doctor_review_demo.html}}
+
+\title{\textbf{暑期实践第二周周报}\\
+\large 面向临床语音转写噪声的病例信息整理与鲁棒性评估}
+\author{解徐轩}
+\date{2026 年 7 月 10 日}
+
+\begin{document}
+
+\maketitle
+
+\noindent\textbf{项目名称：}面向临床语音转写噪声的病例信息整理与鲁棒性评估\\
+\textbf{学生姓名：}解徐轩\\
+\textbf{周报编号：}第二周周报\\
+\textbf{日期：}7.10
+
+\section{本周目标}
+
+本周目标是在第一周 ASR 置信度交互审阅 demo 的基础上，把系统从“小样本可运行”推进到“能量化评估、能接入下游任务、能在全量 PriMock57 上形成对照结果”的阶段。具体目标如下：
+
+\begin{itemize}
+  \item 对第一批 PriMock57 ASR noisy transcript 做质量评估，量化 WER、医学概念错误、置信度分桶错误率和候选覆盖率。
+  \item 将医生审阅范围从所有低置信词收缩到医学实体优先，降低界面噪声，并继续改进候选覆盖逻辑。
+  \item 打通 \code{raw ASR / confirmed transcript / clean reference} 到下游病例信息整理任务的评估链路。
+  \item 扩展到 PriMock57 全量 57 条 consultation、114 路 doctor/patient channel，构建全量 noisy ASR 数据集。
+  \item 完成三文本病例摘要评测：比较 \code{noisy\_asr}、模拟医生审阅后的 \code{doctor\_llm\_repair} 和 \code{clean\_reference} 在病例摘要质量上的差异。
+\end{itemize}
+
+\section{本周完成内容}
+
+\subsection*{数据}
+
+本周将 PriMock57 从第一周的少量音频样本扩展到全量数据。全量 ASR noisy 数据集覆盖 57 条 consultation、114 路 doctor/patient 音频通道。为避免长音频直接前向导致 GPU OOM，本周采用 120 秒 windowed ASR 工程基线，最终生成 75,597 个 ASR words、2,095 个 ASR segments 和 2,861 个待审阅风险 span。
+
+同时，本周确认 PriMock57 自带 doctor/patient \code{TextGrid} 人工转录可以作为 \code{clean\_reference}，并按 consultation 级别完成 noisy ASR、clean reference 和后续 repair transcript 的对齐。所有公开周报指标只使用聚合计数和评估结果，不展示完整 transcript 正文。
+
+\subsection*{方法}
+
+本周方法层主要完成了四条链路：
+
+\begin{enumerate}
+  \item \textbf{ASR 质量与置信度评估：}将 ASR hypothesis 与 \code{TextGrid} clean reference 对齐，计算 WER、medical concept WER、置信度分桶错误率、ECE/NCE/Brier score 和 top-k 候选覆盖率。
+  \item \textbf{医学实体优先审阅：}用 LLM 抽取医学实体，并结合关键词兜底，将界面高亮范围从所有低/中置信度词收缩到医学相关词组；非医学词默认黑色显示，减少医生审阅负担。
+  \item \textbf{候选生成与确认回放：}保留 ASR sequence-level n-best 候选，同时新增医学词表辅助候选和黄/红词级 LLM 候选 prompt 逻辑；医生或模拟审阅者的选择可回放生成 \code{confirmed transcript}。
+  \item \textbf{下游病例摘要评估：}建立病例摘要生成 schema、gold key facts schema、source-aware factuality 评估、ROUGE-L 辅助指标、高风险错误统计、不确定性说明覆盖和 ASR 置信度归因接口。
+\end{enumerate}
+
+\subsection*{结果}
+
+第一，ASR 质量评估显示当前 noisy transcript 已经具备明确的误差画像。在 3 条 channel-level 小样本评估中，micro WER 为 0.3405，micro medical concept WER 为 0.2526；黄色词错误率为 47.85\%，显著高于绿色词的 15.43\%。这说明 ASR 置信度有预警价值，但绿色词仍有错误，不能简单视作“无需审阅”。
+
+第二，医学实体优先审阅降低了界面噪声，但也暴露出候选覆盖不足。T039 后，小样本 3 个医学实体待审 span 均有候选，解决了候选面板空白问题；但候选 exact reference coverage 仍为 0/3，说明候选“可显示”不等于候选“正确”。
+
+第三，全量 PriMock57 noisy ASR 数据集已经生成。全量结果中，词级置信度平均值为 0.9126，绿色词 71,569 个，黄色词 4,028 个，当前阈值下没有红色词。这提示下一步仍需做阈值重标定或引入 CTC posterior/entropy 置信度来源。
+
+第四，T045 三文本病例摘要评测已经跑通。全量 57 条 consultation 中，模拟医生 LLM selector 审阅了 2,861 个风险 span，生成 57 条 consultation-level \code{doctor\_llm\_repair}。下游病例摘要评测共生成 171 条摘要记录和 516 条自动 gold facts，并输出 noisy、repair、clean 三组聚合指标。
+
+\subsection*{展示材料}
+
+本周形成的主要展示材料包括：
+
+\begin{itemize}
+  \item 全量 ASR noisy transcript 数据集 summary；
+  \item ASR 置信度质量评估 summary；
+  \item 医学实体优先审阅 HTML demo；
+  \item \code{noisy\_asr / doctor\_llm\_repair / clean\_reference} 三文本病例摘要最终评测表；
+  \item T045 最终结果 SVG 图。
+\end{itemize}
+
+代码链接：\url{https://github.com/XxxKrabs/clinical-asr-robustness}
+
+\section{本周可展示成果}
+
+\subsection{可展示图：T045 三文本病例摘要评测结果}
+
+图 \ref{fig:t045-final-results} 展示 noisy ASR、模拟医生审阅后 repair transcript 和 clean reference oracle 在病例摘要评测中的对比。当前项目中已有同名 SVG 结果图；为便于后续直接生成 PDF，图中预留 PNG 绝对路径，若上传或转换为 PNG 即可直接编译。
+
+\begin{figure}[H]
+  \centering
+  \IfFileExists{\resultFigurePng}{%
+    \includegraphics[width=0.96\textwidth]{\resultFigurePng}
+  }{%
+    \fbox{\begin{minipage}[c][4.2cm][c]{0.9\textwidth}
+    \centering
+    图片占位：请上传或转换图片到以下绝对路径后重新编译。\\[0.4em]
+    \footnotesize \path{D:/Chasingfordream/内地部分/文书合集/清华大学神经调控/project/outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.png}\\[0.4em]
+    当前已有 SVG：\path{D:/Chasingfordream/内地部分/文书合集/清华大学神经调控/project/outputs/primock57/t045_case_summary_three_texts/primock57_t045_case_summary_final_results.svg}
+    \end{minipage}}
+  }
+  \caption{T045 三文本病例摘要评测结果图}
+  \label{fig:t045-final-results}
+\end{figure}
+
+\subsection{全量 ASR noisy 数据集概览}
+
+\begin{table}[H]
+\centering
+\caption{PriMock57 全量 ASR noisy transcript 数据集概览}
+\label{tab:full-asr-dataset}
+\begin{tabular}{lr}
+\toprule
+项目 & 数值 \\
+\midrule
+consultation 数 & 57 \\
+doctor/patient channel 数 & 114 \\
+ASR word 数 & 75,597 \\
+ASR segment 数 & 2,095 \\
+待审阅风险 span 数 & 2,861 \\
+平均词级置信度 & 0.9126 \\
+绿色词数 & 71,569 \\
+黄色词数 & 4,028 \\
+红色词数 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{ASR 质量与置信度初评}
+
+\begin{table}[H]
+\centering
+\caption{小样本 ASR 质量与置信度评估结果}
+\label{tab:asr-quality}
+\begin{tabular}{lr}
+\toprule
+指标 & 数值 \\
+\midrule
+评估 channel records & 3 \\
+reference token 数 & 2,373 \\
+micro WER & 0.3405 \\
+micro medical concept WER & 0.2526 \\
+绿色词错误率 & 15.43\% \\
+黄色词错误率 & 47.85\% \\
+macro ECE & 0.0651 \\
+span-level candidates 覆盖 & 3/3 \\
+exact reference coverage & 0/3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+表 \ref{tab:asr-quality} 说明：当前置信度分桶确实能区分高风险位置，但候选质量还不够，不能把候选直接当成可靠修复结果。
+
+\subsection{T045 三文本病例摘要最终评测表}
+
+\begin{table}[H]
+\centering
+\caption{T045 三文本病例摘要最终聚合结果}
+\label{tab:t045-final}
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+输入文本 & 样本数 & Precision & Recall & F1 & Critical recall & Omission \\
+\midrule
+\code{noisy\_asr} & 57 & 0.939 & 0.834 & 0.876 & 0.833 & 87 \\
+\code{doctor\_llm\_repair} & 57 & 0.868 & 0.877 & 0.866 & 0.881 & 62 \\
+\code{clean\_reference} & 57 & 1.000 & 1.000 & 1.000 & 1.000 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+从表 \ref{tab:t045-final} 可以看出，real \code{doctor\_llm\_repair} 相比 \code{noisy\_asr} 提高了 Recall（+0.043）和 Critical recall（+0.048），并将 Omission 从 87 降到 62；但 Precision 从 0.939 降到 0.868，F1 从 0.876 小幅降到 0.866。这说明当前模拟审阅提高了事实覆盖，但也引入了更多 unsupported 或 contradicted 事实，后续必须做候选质量和 manual edit 抽样复核。
+
+\subsection{系统 demo 与结构化输出}
+
+本周继续保留医生审阅 HTML demo，绝对路径如下：
+
+\begin{verbatim}
+D:/Chasingfordream/内地部分/文书合集/清华大学神经调控/project/outputs/primock57/t036_doctor_review_demo/doctor_review_demo.html
+\end{verbatim}
+
+T045 的核心结构化输出包括：
+
+\begin{itemize}
+  \item \code{outputs/primock57/t045\_doctor\_llm\_selector/primock57\_t045\_doctor\_llm\_feedback.jsonl}
+  \item \code{outputs/primock57/t045\_doctor\_llm\_selector/primock57\_t045\_doctor\_llm\_decisions.jsonl}
+  \item \code{outputs/primock57/t045\_case\_summary\_three\_texts/primock57\_t045\_case\_summary\_final\_results.csv}
+  \item \code{outputs/primock57/t045\_case\_summary\_three\_texts/primock57\_t045\_case\_summary\_final\_results.svg}
+\end{itemize}
+
+\section{当前结果与初步结论}
+
+本周最重要的结论是：项目已经从“ASR 置信度审阅 demo”推进到“可量化闭环”。现在不只能够展示黄/绿高亮和候选选择，还能够回答三个更关键的问题：ASR noisy transcript 错在哪里，医生/模拟审阅修改后是否改善，下游病例摘要质量是否真正提升。
+
+第一，ASR 置信度有价值，但当前阈值还不能直接用于临床式分流。黄色词错误率明显高于绿色词，说明置信度能帮助定位风险；但绿色词中仍存在错误，并且全量数据当前没有红色词，说明阈值与置信度来源仍需校准。
+
+第二，医生确认并不天然带来下游收益。T045 中模拟医生 selector 让病例摘要覆盖到更多事实，降低遗漏，但同时引入更多不支持或冲突事实，导致 F1 小幅下降。这说明审阅流程的关键不是“让模型多改”，而是让候选、manual edit 和拒绝策略更可靠。
+
+第三，clean reference oracle 的结果提供了清晰上限。clean reference 在当前自动评测中 F1 为 1.000，而 noisy ASR 为 0.876，说明 ASR 噪声确实会影响病例摘要质量，也说明 confirmed transcript 仍有提升空间。
+
+第四，目前评测仍是研究阶段输出。病例摘要生成使用 deterministic keyword baseline，gold facts 由 clean/reference 自动抽取，适合验证管线和观察相对趋势，但不能替代真实医生审阅、人工 gold facts 或正式临床评价。
+
+\section{遇到的问题与当前判断}
+
+\begin{itemize}
+  \item \textbf{候选覆盖与候选正确性仍是瓶颈：}小样本 T039 已让 3/3 待审 span 有候选，但 exact reference coverage 仍为 0/3；全量 T045 中因尚未完整复跑全量医学实体 gating 和词级候选生成，selector 输入中的 \code{spans\_with\_candidates=0}，主要依赖 keep ASR 或 manual edit。
+  \item \textbf{模拟医生 selector 会提高召回但降低精确率：}本周结果显示 repair transcript 覆盖更多事实，但 unsupported 和 contradicted 也增加。当前判断是 selector 在无候选或上下文不足时容易过度编辑，需要抽样复核 manual edit，并增强“无法判断/拒绝修改”的保守策略。
+  \item \textbf{置信度阈值仍需校准：}全量 75,597 个词中没有红色词，说明当前 green/yellow/red 阈值对全量数据区分度不足。T043 已实现 CTC posterior/entropy 词级置信度流水线，但尚未在全量音频上复跑。
+  \item \textbf{下游评估的 gold 层仍需人工增强：}当前 T045 使用自动 gold facts 和 deterministic 摘要生成，适合快速验收，但正式展示中需要至少抽样人工复核 gold facts、selector 决策和摘要事实错误。
+  \item \textbf{长音频工程基线有边界效应：}120 秒 windowed ASR 解决了 OOM，但可能损失跨窗口上下文。后续需要在报告中持续标注 \code{audio\_window\_sec=120}，并检查边界处错误是否增加。
+\end{itemize}
+
+\section{下周计划}
+
+下周计划重点从“跑通全量链路”转向“提高可解释性和展示质量”。具体交付如下：
+
+\begin{enumerate}
+  \item \textbf{补全全量医学实体候选链路。}
+  对 57 条 consultation 全量复跑或补跑 \code{T038 医学实体 gating -> T044 黄/红词级候选 -> T030/T036 审阅样本}，输出全量候选覆盖率、按候选来源统计和候选 exact/reference 覆盖评估表。
+
+  \item \textbf{抽样复核模拟医生 selector。}
+  从 2,861 个风险 span 中抽样 30--50 个 manual edit / keep ASR 决策，人工记录是否合理、是否过度修正、是否应选择 unable-to-judge，并归纳失败模式。
+
+  \item \textbf{改进病例摘要评估可信度。}
+  选取少量 consultation 建立人工或半人工 gold key facts，对 \code{noisy\_asr}、\code{doctor\_llm\_repair} 和 \code{clean\_reference} 三组摘要复跑事实级评估，形成可展示的病例卡片和错误传播案例。
+
+  \item \textbf{优化医生审阅 demo 的展示体验。}
+  改进 HTML demo 中候选面板定位、绿色词视觉负担和待审阅队列展示；形成一张更适合汇报的系统流程图或界面截图。
+
+  \item \textbf{继续做置信度校准。}
+  在小样本上复跑 T043 CTC posterior/entropy 词级置信度，与当前 NeMo word confidence 对比红/黄/绿分布、错误率和 ECE，确定是否替换或融合置信度来源。
+\end{enumerate}
+
+\end{document}

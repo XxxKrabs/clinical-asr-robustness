@@ -7,14 +7,18 @@ from clinical_asr_robustness.asr_confidence import (
     ASRDecodingConfig,
     ASRModelInfo,
     ConfidenceLevel,
+    ConfidenceThresholds,
     read_asr_confidence_jsonl,
     write_asr_confidence_jsonl,
 )
 from clinical_asr_robustness.nemo_confidence_export import (
+    apply_demo_quantile_risk_levels,
     build_asr_confidence_record,
     configure_ctc_greedy_confidence,
+    reclassify_confidence_record,
     summarize_confidence_values,
 )
+from scripts.export_nemo_asr_confidence import total_manifest_audio_duration_sec
 
 
 class FakeHypothesis:
@@ -30,9 +34,22 @@ class FakeHypothesis:
         ],
         "segment": [{"segment": "patient reports cough now", "start": 0.0, "end": 1.3}],
     }
-    word_confidence = [0.93, 0.77, 0.42]
+    word_confidence = [0.96, 0.85, 0.42]
     token_confidence = [0.9, 0.8]
     frame_confidence = [0.9, 0.8, 0.7]
+
+
+class FakeChineseHypothesis:
+    text = "患者咳嗽"
+    timestamp = {
+        "word": [
+            {"word": text, "start": index * 0.2, "end": (index + 1) * 0.2}
+            for index, text in enumerate("患者咳嗽")
+        ]
+    }
+    word_confidence = [0.96, 0.95, 0.42, 0.40]
+    token_confidence = []
+    frame_confidence = []
 
 
 def make_manifest_record() -> dict:
@@ -122,6 +139,105 @@ def test_summarize_confidence_values_reports_distribution() -> None:
     assert summary["mean"] == pytest.approx(1.3 / 3)
     assert summary["median"] == 0.3
     assert summary["p95"] == pytest.approx(0.84)
+
+
+def test_total_manifest_audio_duration_uses_window_durations() -> None:
+    assert total_manifest_audio_duration_sec(
+        [
+            {"duration": 30.0, "source_duration_sec": 280.704},
+            {"duration_sec": 10.661375, "source_duration_sec": 280.704},
+            {"duration": None},
+        ]
+    ) == pytest.approx(40.661375)
+
+
+def test_chinese_auto_units_preserve_surface_without_spaces() -> None:
+    record = build_asr_confidence_record(
+        manifest_record={
+            "sample_id": "remote_programming_40:case_demo:mixed",
+            "dataset": "remote_programming_40",
+            "source_channel": "mixed",
+            "text_unit_mode": "auto",
+        },
+        hypothesis=FakeChineseHypothesis(),
+        model_info={"model_name": "fake_hybrid_zh"},
+        decoding_config={"strategy": "greedy"},
+    )
+
+    assert [word.text for word in record.asr_words] == list("患者咳嗽")
+    assert [word.char_start for word in record.asr_words] == [0, 1, 2, 3]
+    assert record.asr_segments[0].text == "患者咳嗽"
+    assert record.uncertain_spans[0].text == "咳嗽"
+    assert record.alignment.metadata["text_unit_mode_active"] == "timestamp"
+
+
+def test_window_record_uses_source_audio_and_absolute_timestamps() -> None:
+    manifest_record = {
+        "sample_id": "remote_programming_40:case_demo:0001",
+        "parent_sample_id": "remote_programming_40:case_demo:mixed",
+        "unit_id": "case_demo:window_0001",
+        "dataset": "remote_programming_40",
+        "source_channel": "mixed",
+        "text_unit_mode": "auto",
+        "audio_filepath": "data/interim/remote_programming_40/audio_16k/window.wav",
+        "duration_sec": 30.0,
+        "source_audio_filepath": "data/raw/remote_programming_40/case_demo.mp3",
+        "source_audio_sha256": "abc123",
+        "source_duration_sec": 300.0,
+        "source_start_sec": 30.0,
+        "source_end_sec": 60.0,
+    }
+
+    record = build_asr_confidence_record(
+        manifest_record=manifest_record,
+        hypothesis=FakeChineseHypothesis(),
+        model_info={"model_name": "fake_hybrid_zh"},
+        decoding_config={"strategy": "greedy"},
+    )
+
+    assert record.audio_filepath == "data/raw/remote_programming_40/case_demo.mp3"
+    assert record.duration_sec == 300.0
+    assert record.asr_words[0].start_sec == pytest.approx(30.0)
+    assert record.asr_words[-1].end_sec == pytest.approx(30.8)
+    source = record.metadata["source_manifest"]
+    assert source["asr_input_audio_filepath"].endswith("window.wav")
+    assert source["timestamp_reference"] == "source_audio_absolute"
+    assert source["timestamp_offset_sec"] == 30.0
+
+
+def test_reclassify_confidence_record_rebuilds_three_risk_levels() -> None:
+    record = make_record()
+    updated = reclassify_confidence_record(
+        record,
+        ConfidenceThresholds(green_min=0.90, yellow_min=0.80),
+    )
+
+    assert [word.confidence_level for word in updated.asr_words] == [
+        ConfidenceLevel.GREEN,
+        ConfidenceLevel.YELLOW,
+        ConfidenceLevel.RED,
+        ConfidenceLevel.UNKNOWN,
+    ]
+    assert updated.confidence.thresholds.green_min == 0.90
+    assert updated.confidence.thresholds.yellow_min == 0.80
+    assert updated.uncertain_spans[0].start_word_index == 1
+    assert updated.metadata["confidence_threshold_reclassification"][
+        "clinical_calibration"
+    ] is False
+    assert record.metadata.get("confidence_threshold_reclassification") is None
+
+
+def test_demo_quantile_policy_is_rank_based_and_marked_uncalibrated() -> None:
+    updated = apply_demo_quantile_risk_levels([make_record()])[0]
+
+    levels = [word.confidence_level for word in updated.asr_words]
+    assert levels.count(ConfidenceLevel.RED) == 1
+    assert levels.count(ConfidenceLevel.YELLOW) == 1
+    assert levels.count(ConfidenceLevel.GREEN) == 1
+    assert levels.count(ConfidenceLevel.UNKNOWN) == 1
+    policy = updated.confidence.metadata["risk_level_policy"]
+    assert policy["policy"] == "demo_quantile_v0"
+    assert policy["calibrated"] is False
 
 
 def test_configure_ctc_greedy_confidence_exposes_method_parameters() -> None:

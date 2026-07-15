@@ -88,7 +88,7 @@ wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python s
 
 | 阶段 | 关键结果 |
 |---|---|
-| T028 ASR confidence | 3 条 record；1958 个 ASR word；1795 green、163 yellow、0 red；word confidence mean 0.8874；阈值为 green ≥ 0.8、yellow ≥ 0.5。 |
+| T028 ASR confidence（历史旧阈值） | 3 条 record；1958 个 ASR word；1795 green、163 yellow、0 red；word confidence mean 0.8874；当时阈值为 green ≥ 0.8、yellow ≥ 0.5；2026-07-13 起默认改为 0.9/0.8。 |
 | T037 n-best | 3 条 record；每条 5 个 beam；共 15 个 sequence-level candidate；3 条均有多个 beam 且有唯一变体。 |
 | T038 医学实体 gating | 3 条 record；医学实体着色词 133 个；医学实体待审阅 span 3 个，均为 yellow；非医学词显示为 neutral black。 |
 | T029 候选对齐 | sequence alternatives 15 个；医学实体 uncertain spans 3 个；span alternatives 0 个；3 个 span 均无 span-level candidate。 |

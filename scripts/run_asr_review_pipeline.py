@@ -30,6 +30,14 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from clinical_asr_robustness.dataset_profiles import (  # noqa: E402
+    DatasetProfile,
+    resolve_dataset_profile,
+)
 
 DEFAULT_MANIFEST = Path("data/interim/primock57/manifests/primock57_nemo_asr_input_manifest.jsonl")
 DEFAULT_MODEL_PATH = Path("data/external/asr_models/nemo/stt_en_fastconformer_ctc_large.nemo")
@@ -71,6 +79,9 @@ DEFAULT_LLM_CANDIDATE_PROMPTS_JSONL = Path(
 
 DEFAULT_REVIEW_JSONL = Path(
     "outputs/primock57/t030_review_samples/primock57_medical_entity_review_samples.jsonl"
+)
+DEFAULT_REVIEW_CONVERSATION_JSONL = Path(
+    "outputs/primock57/t030_review_samples/primock57_medical_entity_review_conversations.jsonl"
 )
 DEFAULT_REVIEW_CSV = Path(
     "outputs/primock57/t030_review_samples/primock57_medical_entity_review_spans.csv"
@@ -114,6 +125,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
 
     parser.add_argument(
+        "--dataset",
+        default="auto",
+        help=(
+            "数据集 ID 或 auto。auto 会读取 manifest.dataset；未提供 manifest 时保持"
+            "历史 PriMock57 英文默认行为。"
+        ),
+    )
+    parser.add_argument(
         "--python-executable",
         default=sys.executable,
         help="用于调用各阶段脚本的 Python；默认使用当前解释器。",
@@ -134,48 +153,75 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sample-id", action="append", dest="sample_ids", default=None)
     parser.add_argument("--record-index", action="append", type=int, default=None)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument("--model-path", type=Path, default=None)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument(
+        "--precision",
+        choices=["auto", "fp32", "fp16", "bf16"],
+        default="auto",
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--transcribe-chunk-size", type=int, default=1)
 
-    parser.add_argument("--asr-confidence-jsonl", type=Path, default=DEFAULT_ASR_CONFIDENCE_JSONL)
-    parser.add_argument("--t028-run-config-json", type=Path, default=DEFAULT_T028_RUN_CONFIG)
-    parser.add_argument("--nbest-jsonl", type=Path, default=DEFAULT_NBEST_JSONL)
-    parser.add_argument("--t037-run-config-json", type=Path, default=DEFAULT_T037_RUN_CONFIG)
+    parser.add_argument("--asr-confidence-jsonl", type=Path, default=None)
+    parser.add_argument("--t028-run-config-json", type=Path, default=None)
+    parser.add_argument("--nbest-jsonl", type=Path, default=None)
+    parser.add_argument("--t037-run-config-json", type=Path, default=None)
 
-    parser.add_argument("--medical-entity-jsonl", type=Path, default=DEFAULT_MEDICAL_ENTITY_JSONL)
-    parser.add_argument("--entity-cache-jsonl", type=Path, default=DEFAULT_ENTITY_CACHE_JSONL)
-    parser.add_argument("--t038-run-config-json", type=Path, default=DEFAULT_T038_RUN_CONFIG)
+    parser.add_argument("--medical-entity-jsonl", type=Path, default=None)
+    parser.add_argument("--entity-cache-jsonl", type=Path, default=None)
+    parser.add_argument("--t038-run-config-json", type=Path, default=None)
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--force-refresh-entities", action="store_true")
     parser.add_argument("--llm-timeout-sec", type=float, default=60.0)
 
-    parser.add_argument("--candidate-jsonl", type=Path, default=DEFAULT_CANDIDATE_JSONL)
-    parser.add_argument("--t029-run-config-json", type=Path, default=DEFAULT_T029_RUN_CONFIG)
+    parser.add_argument("--candidate-jsonl", type=Path, default=None)
+    parser.add_argument("--t029-run-config-json", type=Path, default=None)
     parser.add_argument(
         "--llm-candidate-prompts-jsonl",
         type=Path,
-        default=DEFAULT_LLM_CANDIDATE_PROMPTS_JSONL,
+        default=None,
     )
+    parser.add_argument("--llm-candidate-cache-jsonl", type=Path, default=None)
     parser.add_argument("--max-sequence-alternatives", type=int, default=5)
     parser.add_argument("--max-span-alternatives", type=int, default=3)
-    parser.add_argument("--run-llm-candidates", action="store_true")
+    parser.add_argument("--aux-medical-lexicon-json", type=Path, default=None)
+    llm_candidate_group = parser.add_mutually_exclusive_group()
+    llm_candidate_group.add_argument(
+        "--run-llm-candidates",
+        action="store_true",
+        dest="run_llm_candidates",
+        help="调用外部 LLM 生成候选。中文已批准数据集配置默认启用。",
+    )
+    llm_candidate_group.add_argument(
+        "--no-run-llm-candidates",
+        action="store_false",
+        dest="run_llm_candidates",
+        help="显式关闭 LLM 候选，只生成 prompt 记录。",
+    )
+    parser.set_defaults(run_llm_candidates=None)
     parser.add_argument("--max-llm-word-candidates", type=int, default=3)
     parser.add_argument("--llm-word-context-window", type=int, default=5)
     parser.add_argument("--max-llm-lexicon-terms", type=int, default=24)
+    parser.add_argument("--llm-candidate-prompt-profile", default=None)
+    parser.add_argument(
+        "--llm-candidate-context-scope",
+        choices=["local_window", "complete_consultation"],
+        default=None,
+    )
 
-    parser.add_argument("--review-jsonl", type=Path, default=DEFAULT_REVIEW_JSONL)
-    parser.add_argument("--review-csv", type=Path, default=DEFAULT_REVIEW_CSV)
-    parser.add_argument("--review-html", type=Path, default=DEFAULT_REVIEW_HTML)
-    parser.add_argument("--t030-run-config-json", type=Path, default=DEFAULT_T030_RUN_CONFIG)
+    parser.add_argument("--review-jsonl", type=Path, default=None)
+    parser.add_argument("--review-conversation-jsonl", type=Path, default=None)
+    parser.add_argument("--review-csv", type=Path, default=None)
+    parser.add_argument("--review-html", type=Path, default=None)
+    parser.add_argument("--t030-run-config-json", type=Path, default=None)
 
-    parser.add_argument("--doctor-html", type=Path, default=DEFAULT_DOCTOR_HTML)
-    parser.add_argument("--embedded-review-jsonl", type=Path, default=DEFAULT_EMBEDDED_REVIEW_JSONL)
-    parser.add_argument("--t036-run-config-json", type=Path, default=DEFAULT_T036_RUN_CONFIG)
-    parser.add_argument("--html-title", default="T036 医学实体优先 ASR 医生审阅 demo")
+    parser.add_argument("--doctor-html", type=Path, default=None)
+    parser.add_argument("--embedded-review-jsonl", type=Path, default=None)
+    parser.add_argument("--t036-run-config-json", type=Path, default=None)
+    parser.add_argument("--html-title", default=None)
     parser.add_argument(
         "--open-html",
         action="store_true",
@@ -188,19 +234,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="若反馈 JSONL 已存在，则继续跑 T035 confirmed transcript。",
     )
-    parser.add_argument("--feedback-jsonl", type=Path, default=DEFAULT_FEEDBACK_JSONL)
-    parser.add_argument("--confirmed-jsonl", type=Path, default=DEFAULT_CONFIRMED_JSONL)
-    parser.add_argument("--t035-run-config-json", type=Path, default=DEFAULT_T035_RUN_CONFIG)
+    parser.add_argument("--feedback-jsonl", type=Path, default=None)
+    parser.add_argument("--confirmed-jsonl", type=Path, default=None)
+    parser.add_argument("--t035-run-config-json", type=Path, default=None)
     parser.add_argument("--require-feedback-for-all-spans", action="store_true")
 
     parser.add_argument(
         "--pipeline-run-config-json",
         type=Path,
-        default=DEFAULT_PIPELINE_RUN_CONFIG,
+        default=None,
     )
     parser.add_argument("--dry-run", action="store_true", help="只打印将要执行的命令。")
 
-    return parser.parse_args()
+    return apply_dataset_defaults(parser.parse_args())
 
 
 def resolve_project_path(path: Path | str) -> Path:
@@ -208,6 +254,112 @@ def resolve_project_path(path: Path | str) -> Path:
     if resolved.is_absolute():
         return resolved
     return PROJECT_ROOT / resolved
+
+
+def dataset_paths(profile: DatasetProfile) -> dict[str, Path | str]:
+    dataset = profile.dataset_id
+    root = profile.output_root
+    return {
+        "manifest": profile.default_manifest,
+        "model_path": profile.default_model_path,
+        "asr_confidence_jsonl": root
+        / "t028_nemo_asr_confidence"
+        / f"{dataset}_asr_confidence_limit2.jsonl",
+        "t028_run_config_json": root
+        / "t028_nemo_asr_confidence"
+        / "t028_nemo_asr_confidence_limit2_run.json",
+        "nbest_jsonl": root
+        / "t037_nemo_asr_nbest"
+        / f"{dataset}_sequence_nbest_limit2.jsonl",
+        "t037_run_config_json": root
+        / "t037_nemo_asr_nbest"
+        / "t037_nemo_asr_nbest_limit2_run.json",
+        "medical_entity_jsonl": root
+        / "t038_medical_entity_review"
+        / f"{dataset}_asr_confidence_medical_entities.jsonl",
+        "entity_cache_jsonl": root
+        / "t038_medical_entity_review"
+        / f"{dataset}_medical_entities_llm.jsonl",
+        "t038_run_config_json": root
+        / "t038_medical_entity_review"
+        / "t038_medical_entity_review_run.json",
+        "candidate_jsonl": root
+        / "t029_asr_nbest_candidates"
+        / f"{dataset}_asr_confidence_medical_entity_candidates.jsonl",
+        "t029_run_config_json": root
+        / "t029_asr_nbest_candidates"
+        / "t029_asr_nbest_candidates_run.json",
+        "llm_candidate_prompts_jsonl": root
+        / "t029_asr_nbest_candidates"
+        / f"{dataset}_llm_word_candidate_prompts.jsonl",
+        "llm_candidate_cache_jsonl": root
+        / "t029_asr_nbest_candidates"
+        / f"{dataset}_llm_word_candidate_responses.jsonl",
+        "aux_medical_lexicon_json": profile.medical_candidate_lexicon_path,
+        "llm_candidate_prompt_profile": profile.llm_candidate_prompt_profile,
+        "llm_candidate_context_scope": profile.llm_candidate_context_scope,
+        "review_jsonl": root
+        / "t030_review_samples"
+        / f"{dataset}_medical_entity_review_samples.jsonl",
+        "review_conversation_jsonl": root
+        / "t030_review_samples"
+        / f"{dataset}_medical_entity_review_conversations.jsonl",
+        "review_csv": root
+        / "t030_review_samples"
+        / f"{dataset}_medical_entity_review_spans.csv",
+        "review_html": root
+        / "t030_review_samples"
+        / f"{dataset}_medical_entity_review_samples.html",
+        "t030_run_config_json": root
+        / "t030_review_samples"
+        / "t030_review_samples_run.json",
+        "doctor_html": root / "t036_doctor_review_demo" / "doctor_review_demo.html",
+        "embedded_review_jsonl": root
+        / "t036_doctor_review_demo"
+        / "doctor_review_samples.embedded.jsonl",
+        "t036_run_config_json": root
+        / "t036_doctor_review_demo"
+        / "t036_doctor_review_demo_run.json",
+        "feedback_jsonl": root
+        / "t036_doctor_review_demo"
+        / "doctor_feedback_log.jsonl",
+        "confirmed_jsonl": root
+        / "t035_confirmed_transcripts"
+        / f"{dataset}_confirmed_transcripts.jsonl",
+        "t035_run_config_json": root
+        / "t035_confirmed_transcripts"
+        / "t035_confirmed_transcripts_run.json",
+        "pipeline_run_config_json": root
+        / "asr_review_pipeline"
+        / "asr_review_pipeline_run.json",
+        "html_title": (
+            "T060 中文医学实体优先 ASR 医生审阅 demo"
+            if profile.language.startswith("zh")
+            else "T036 医学实体优先 ASR 医生审阅 demo"
+        ),
+    }
+
+
+def apply_dataset_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    manifest_hint = (
+        resolve_project_path(args.manifest) if args.manifest is not None else None
+    )
+    profile = resolve_dataset_profile(
+        dataset=args.dataset,
+        manifest_path=manifest_hint,
+    )
+    for field, value in dataset_paths(profile).items():
+        if getattr(args, field) is None:
+            setattr(args, field, value)
+    args.dataset = profile.dataset_id
+    args.dataset_language = profile.language
+    args.text_unit_mode = profile.text_unit_mode
+    args.confidence_policy = profile.confidence_policy
+    args.word_confidence_source = profile.word_confidence_source
+    args.save_frame_distributions = profile.save_frame_distributions
+    if args.run_llm_candidates is None:
+        args.run_llm_candidates = profile.run_llm_candidates_default
+    return args
 
 
 def path_for_summary(path: Path | str) -> str:
@@ -252,6 +404,8 @@ def build_t028_step(args: argparse.Namespace) -> PipelineStep:
     command = [
         args.python_executable,
         "scripts/export_nemo_asr_confidence.py",
+        "--dataset",
+        args.dataset,
         "--manifest",
         str(args.manifest),
         "--model-path",
@@ -262,13 +416,21 @@ def build_t028_step(args: argparse.Namespace) -> PipelineStep:
         str(args.t028_run_config_json),
         "--device",
         args.device,
+        "--precision",
+        args.precision,
         "--batch-size",
         str(args.batch_size),
         "--num-workers",
         str(args.num_workers),
         "--transcribe-chunk-size",
         str(args.transcribe_chunk_size),
+        "--threshold-policy",
+        args.confidence_policy,
+        "--word-confidence-source",
+        args.word_confidence_source,
     ]
+    if args.save_frame_distributions:
+        command.append("--save-frame-distributions")
     add_sample_selection(command, args)
     return PipelineStep("T028", "导出 ASR transcript、词级置信度和初始风险 span", command)
 
@@ -277,6 +439,8 @@ def build_t037_step(args: argparse.Namespace) -> PipelineStep:
     command = [
         args.python_executable,
         "scripts/export_nemo_asr_nbest.py",
+        "--dataset",
+        args.dataset,
         "--manifest",
         str(args.manifest),
         "--model-path",
@@ -287,6 +451,8 @@ def build_t037_step(args: argparse.Namespace) -> PipelineStep:
         str(args.t037_run_config_json),
         "--device",
         args.device,
+        "--precision",
+        args.precision,
         "--batch-size",
         str(args.batch_size),
         "--num-workers",
@@ -336,14 +502,22 @@ def build_t029_step(args: argparse.Namespace) -> PipelineStep:
         str(args.max_sequence_alternatives),
         "--max-span-alternatives",
         str(args.max_span_alternatives),
+        "--aux-medical-lexicon-json",
+        str(args.aux_medical_lexicon_json),
         "--llm-candidate-prompts-jsonl",
         str(args.llm_candidate_prompts_jsonl),
+        "--llm-candidate-cache-jsonl",
+        str(args.llm_candidate_cache_jsonl),
         "--max-llm-word-candidates",
         str(args.max_llm_word_candidates),
         "--llm-word-context-window",
         str(args.llm_word_context_window),
         "--max-llm-lexicon-terms",
         str(args.max_llm_lexicon_terms),
+        "--llm-candidate-prompt-profile",
+        str(args.llm_candidate_prompt_profile),
+        "--llm-candidate-context-scope",
+        str(args.llm_candidate_context_scope),
         "--env-file",
         str(args.env_file),
         "--llm-timeout-sec",
@@ -362,6 +536,8 @@ def build_t030_step(args: argparse.Namespace) -> PipelineStep:
         str(args.candidate_jsonl),
         "--output-jsonl",
         str(args.review_jsonl),
+        "--conversation-jsonl",
+        str(args.review_conversation_jsonl),
         "--output-csv",
         str(args.review_csv),
         "--output-html",
@@ -538,11 +714,24 @@ def build_summary(
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "project_root": str(PROJECT_ROOT),
         "parameters": {
+            "dataset": args.dataset,
+            "language": args.dataset_language,
+            "text_unit_mode": args.text_unit_mode,
+            "confidence_policy": args.confidence_policy,
+            "word_confidence_source": args.word_confidence_source,
+            "save_frame_distributions": args.save_frame_distributions,
+            "precision": args.precision,
             "run_asr": args.run_asr,
             "effective_asr_limit": effective_asr_limit(args),
             "sample_ids": args.sample_ids,
             "record_indices": args.record_index,
             "force_refresh_entities": args.force_refresh_entities,
+            "run_llm_candidates": args.run_llm_candidates,
+            "llm_candidate_prompt_profile": args.llm_candidate_prompt_profile,
+            "llm_candidate_context_scope": args.llm_candidate_context_scope,
+            "aux_medical_lexicon_json": path_for_summary(
+                args.aux_medical_lexicon_json
+            ),
             "apply_feedback": args.apply_feedback,
             "apply_feedback_if_exists": args.apply_feedback_if_exists,
             "dry_run": args.dry_run,
@@ -558,7 +747,16 @@ def build_summary(
         "outputs": {
             "medical_entity_jsonl": path_for_summary(args.medical_entity_jsonl),
             "candidate_jsonl": path_for_summary(args.candidate_jsonl),
+            "llm_candidate_prompts_jsonl": path_for_summary(
+                args.llm_candidate_prompts_jsonl
+            ),
+            "llm_candidate_cache_jsonl": path_for_summary(
+                args.llm_candidate_cache_jsonl
+            ),
             "review_jsonl": path_for_summary(args.review_jsonl),
+            "review_conversation_jsonl": path_for_summary(
+                args.review_conversation_jsonl
+            ),
             "review_csv": path_for_summary(args.review_csv),
             "review_html": path_for_summary(args.review_html),
             "doctor_html": path_for_summary(args.doctor_html),
@@ -585,6 +783,7 @@ def print_handoff(args: argparse.Namespace, *, success: bool) -> None:
     print("\nASR 医学实体优先医生审阅流程完成。")
     print(f"- 最终 HTML：{path_for_summary(args.doctor_html)}")
     print(f"- 审阅样本：{path_for_summary(args.review_jsonl)}")
+    print(f"- 完整对话审阅包：{path_for_summary(args.review_conversation_jsonl)}")
     print(f"- 候选输入：{path_for_summary(args.candidate_jsonl)}")
     print(f"- 流水线摘要：{path_for_summary(args.pipeline_run_config_json)}")
     print("\nPowerShell 手动打开 HTML：")

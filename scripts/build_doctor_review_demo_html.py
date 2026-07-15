@@ -101,7 +101,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     output_html.parent.mkdir(parents=True, exist_ok=True)
     output_html.write_text(
-        build_review_html(samples, title=args.title, interactive=True),
+        build_review_html(
+            samples,
+            title=args.title,
+            interactive=True,
+            html_output_path=output_html,
+            project_root=PROJECT_ROOT,
+        ),
         encoding="utf-8",
         newline="\n",
     )

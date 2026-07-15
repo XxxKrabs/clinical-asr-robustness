@@ -36,7 +36,7 @@ def make_quality_eval_record() -> ASRConfidenceRecord:
         reference_textgrid_path="data/external/primock57/transcripts/demo_patient.TextGrid",
         reference_text_included=False,
         asr_transcript="patient reports cough now",
-        asr_confidence=0.77,
+        asr_confidence=0.85,
         asr_words=[
             ASRWord(
                 word_index=0,
@@ -50,7 +50,7 @@ def make_quality_eval_record() -> ASRConfidenceRecord:
                 text="reports",
                 start_sec=0.4,
                 end_sec=0.8,
-                confidence=0.77,
+                confidence=0.85,
             ),
             ASRWord(
                 word_index=2,

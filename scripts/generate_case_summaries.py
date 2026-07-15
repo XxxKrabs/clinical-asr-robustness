@@ -19,9 +19,14 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from clinical_asr_robustness.asr_quality_evaluation import resolve_project_path  # noqa: E402
 from clinical_asr_robustness.case_summary_generation import (  # noqa: E402
+    DEFAULT_EVIDENCE_WEIGHTING_PROFILE,
     DEFAULT_SUMMARY_LANGUAGE,
     INPUT_UNIT_CONSULTATION,
     INPUT_UNIT_RECORD,
+    INPUT_VARIANT_CONFIRMED_TRANSCRIPT,
+    SUPPORTED_EVIDENCE_WEIGHTING_PROFILES,
+    SUPPORTED_INPUT_VARIANTS,
+    evidence_weighting_metadata,
     run_case_summary_generation,
     write_json,
 )
@@ -30,6 +35,10 @@ from clinical_asr_robustness.medical_entity_review import DEFAULT_API_KEY_ENV  #
 DEFAULT_ASR_INPUT_JSONL = Path(
     "outputs/primock57/t029_asr_nbest_candidates/"
     "primock57_asr_confidence_medical_entity_candidates.jsonl"
+)
+DEFAULT_CONFIRMED_INPUT_JSONL = Path(
+    "outputs/primock57/t035_confirmed_transcripts/"
+    "primock57_confirmed_transcripts.simulated_accept_asr.jsonl"
 )
 DEFAULT_OUTPUT_DIR = Path("outputs/primock57/t041_case_summary_generation")
 DEFAULT_RECORDS_NAME = "primock57_t041_case_summary_records.jsonl"
@@ -67,6 +76,22 @@ def parse_args() -> argparse.Namespace:
         help="运行摘要 JSON 文件名。",
     )
     parser.add_argument(
+        "--input-variants",
+        nargs="+",
+        choices=SUPPORTED_INPUT_VARIANTS,
+        default=["noisy_asr"],
+        help=(
+            "病例摘要输入版本；T042b 可同时指定 noisy_asr confirmed_transcript "
+            "reference_oracle。raw_asr 会按 noisy_asr 处理。"
+        ),
+    )
+    parser.add_argument(
+        "--confirmed-input-jsonl",
+        type=Path,
+        default=DEFAULT_CONFIRMED_INPUT_JSONL,
+        help="T035 confirmed transcript JSONL；仅请求 confirmed_transcript variant 时使用。",
+    )
+    parser.add_argument(
         "--group-by",
         choices=[INPUT_UNIT_CONSULTATION, INPUT_UNIT_RECORD],
         default=INPUT_UNIT_CONSULTATION,
@@ -77,6 +102,15 @@ def parse_args() -> argparse.Namespace:
         choices=["zh", "en"],
         default=DEFAULT_SUMMARY_LANGUAGE,
         help="病例摘要输出语言；默认中文。",
+    )
+    parser.add_argument(
+        "--evidence-weighting-profile",
+        choices=SUPPORTED_EVIDENCE_WEIGHTING_PROFILES,
+        default=DEFAULT_EVIDENCE_WEIGHTING_PROFILE,
+        help=(
+            "摘要证据说话人加权配置；默认 field_conditioned_v1 按字段动态加权，"
+            "role_blind 用于消融基线。"
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -127,6 +161,18 @@ def parse_args() -> argparse.Namespace:
         default=1600,
         help="LLM 输出 max_tokens。",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="并发生成请求数；默认 1。仅在 API 支持并发时提高。",
+    )
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=1,
+        help="单条生成失败时的最大尝试次数；默认 1（不重试）。",
+    )
     return parser.parse_args()
 
 
@@ -139,10 +185,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         output_records_jsonl=records_path,
         output_summary_json=summary_path,
         project_root=PROJECT_ROOT,
+        input_variants=args.input_variants,
+        confirmed_input_jsonl=(
+            args.confirmed_input_jsonl
+            if INPUT_VARIANT_CONFIRMED_TRANSCRIPT in args.input_variants
+            else None
+        ),
         group_by=args.group_by,
         run_llm=args.run_llm,
         limit=args.limit,
         summary_language=args.summary_language,
+        evidence_weighting_profile=args.evidence_weighting_profile,
         include_prompt=not args.exclude_prompts,
         api_key_env=args.api_key_env,
         base_url=args.base_url,
@@ -150,6 +203,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         dotenv_path=args.dotenv_path,
         timeout_sec=args.timeout_sec,
         max_tokens=args.max_tokens,
+        max_workers=args.workers,
+        max_attempts=args.max_attempts,
     )
 
 
@@ -164,17 +219,30 @@ def build_run_config(
     output_dir = resolve_project_path(args.output_dir, PROJECT_ROOT)
     record: dict[str, Any] = {
         "task_id": "T041",
+        "t042_subtask": summary.get("t042_subtask"),
         "status": status,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "project_root": str(PROJECT_ROOT),
+        "evidence_weighting": evidence_weighting_metadata(
+            args.evidence_weighting_profile
+        ),
         "inputs": {
             "asr_input_jsonl": _path_for_record(
                 resolve_project_path(args.asr_input_jsonl, PROJECT_ROOT)
             ),
+            "confirmed_input_jsonl": _path_for_record(
+                resolve_project_path(args.confirmed_input_jsonl, PROJECT_ROOT)
+            )
+            if INPUT_VARIANT_CONFIRMED_TRANSCRIPT in args.input_variants
+            else None,
+            "input_variants": args.input_variants,
             "group_by": args.group_by,
             "limit": args.limit,
             "summary_language": args.summary_language,
+            "evidence_weighting_profile": args.evidence_weighting_profile,
             "run_llm": args.run_llm,
+            "workers": args.workers,
+            "max_attempts": args.max_attempts,
             "dotenv_path": _path_for_record(
                 resolve_project_path(args.dotenv_path, PROJECT_ROOT)
             )
@@ -192,6 +260,8 @@ def build_run_config(
         "validation": {
             "input_units": summary.get("record_count", 0),
             "source_records": summary.get("source_record_count", 0),
+            "input_variant_counts": summary.get("input_variant_counts", {}),
+            "records_skipped": summary.get("records_skipped", 0),
             "summary_contains_full_transcript_text": False,
             "records_jsonl_contains_full_transcript_text": True,
             "research_use_only": True,
@@ -226,7 +296,10 @@ def main() -> None:
         print(f"- input units: {summary['record_count']}")
         print(f"- source ASR records: {summary['source_record_count']}")
         print(f"- group_by: {summary['group_by']}")
+        print(f"- input variants: {summary['input_variant_counts']}")
         print(f"- status counts: {summary['status_counts']}")
+        if summary.get("records_skipped", 0):
+            print(f"- skipped records: {summary['records_skipped']}")
         print(f"- records: {output_dir / args.records_name}")
         print(f"- summary: {output_dir / args.summary_name}")
     except Exception as exc:

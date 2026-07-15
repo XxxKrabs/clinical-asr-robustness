@@ -92,3 +92,25 @@ def test_build_t037_nbest_jsonl_record_is_consumable_by_t029(tmp_path) -> None:
     by_key = load_nbest_jsonl(output)
     assert by_key["sample_id:primock57:demo:patient"][1].text == "i have diarrhea"
     assert by_key["record_id:nemo_entropy_primock57_demo_patient"][0].source == "nemo_beam_batch"
+
+
+def test_nbest_window_record_uses_source_audio_for_review() -> None:
+    record = build_nbest_jsonl_record(
+        manifest_record={
+            "sample_id": "remote_programming_40:case_demo:0001",
+            "dataset": "remote_programming_40",
+            "audio_filepath": "data/interim/window.wav",
+            "duration_sec": 30.0,
+            "source_audio_filepath": "data/raw/remote_programming_40/case_demo.mp3",
+            "source_duration_sec": 300.0,
+            "source_start_sec": 30.0,
+            "source_end_sec": 60.0,
+        },
+        hypothesis_group=[SimpleNamespace(text="候选", score=-1.0)],
+    )
+
+    assert record["audio_filepath"].endswith("case_demo.mp3")
+    assert record["duration_sec"] == 300.0
+    source = record["metadata"]["source_manifest"]
+    assert source["asr_input_audio_filepath"].endswith("window.wav")
+    assert source["timestamp_reference"] == "source_audio_absolute"

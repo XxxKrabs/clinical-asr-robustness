@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping
@@ -32,6 +33,7 @@ from clinical_asr_robustness.asr_confidence import (
     ConfidenceLevel,
     UncertainSpan,
     confidence_level_for_score,
+    join_asr_words,
 )
 
 MEDICAL_ENTITY_REVIEW_SCHEMA_VERSION = "medical_entity_review/v1"
@@ -420,7 +422,9 @@ def extract_medical_entities_with_llm(
             },
         ],
         "temperature": 0,
-        "max_tokens": 1600,
+        # 全量 PriMock57 的单路 transcript 明显长于早期 limit2 样本；1600
+        # tokens 会把实体 JSON 截断。给结构化实体列表留出足够输出空间。
+        "max_tokens": 4096,
     }
     request = urllib.request.Request(
         endpoint_for_chat_completions(config.base_url),
@@ -708,6 +712,7 @@ def apply_medical_entity_review_gating(
     review_spans = _build_medical_review_spans(
         annotated_words,
         groups,
+        transcript=record.asr_transcript,
         entities_by_id={entity.entity_id or "": entity for entity in resolved_entities},
         generated_by=generated_by,
         thresholds=record.confidence.thresholds,
@@ -854,8 +859,9 @@ def _entity_copy_for_word_range(
         "original_end_char": entity.end_char,
     }
     update: dict[str, Any] = {
-        "text": " ".join(
-            word.text for word in record.asr_words[start_word_index:end_word_index]
+        "text": join_asr_words(
+            record.asr_words[start_word_index:end_word_index],
+            transcript=record.asr_transcript,
         ),
         "start_char": start_char,
         "end_char": end_char,
@@ -956,8 +962,9 @@ def _keyword_fallback_mention(
         start_word_index,
         end_word_index,
     )
-    text = " ".join(
-        word.text for word in record.asr_words[start_word_index:end_word_index]
+    text = join_asr_words(
+        record.asr_words[start_word_index:end_word_index],
+        transcript=record.asr_transcript,
     )
     return MedicalEntityMention(
         entity_id=(
@@ -1047,14 +1054,20 @@ def resolve_entity_word_range(
 
     word_char_spans = word_char_spans_for_record(record)
     if entity.start_char is not None and entity.end_char is not None:
-        overlapped = [
-            word_span.word_index
-            for word_span in word_char_spans
-            if entity.start_char < word_span.end_char
-            and word_span.start_char < entity.end_char
-        ]
-        if overlapped:
-            return min(overlapped), max(overlapped) + 1
+        offset_text = record.asr_transcript[entity.start_char : entity.end_char]
+        # LLM 的字符偏移偶尔会漂移到相邻普通词。只有偏移对应文本与
+        # entity mention 一致时才采用，否则继续使用 mention 文本匹配。
+        if normalize_text_for_match(offset_text) == normalize_text_for_match(
+            entity.text
+        ):
+            overlapped = [
+                word_span.word_index
+                for word_span in word_char_spans
+                if entity.start_char < word_span.end_char
+                and word_span.start_char < entity.end_char
+            ]
+            if overlapped:
+                return min(overlapped), max(overlapped) + 1
 
     char_range = find_entity_char_range(record.asr_transcript, entity.text)
     if char_range is not None:
@@ -1113,7 +1126,11 @@ def word_char_spans_for_record(record: ASRConfidenceRecord) -> list[WordCharSpan
 
 
 def find_entity_char_range(transcript: str, entity_text: str) -> tuple[int, int] | None:
-    """在 transcript 中查找 entity 文本的字符范围。"""
+    """在 transcript 中查找 entity 文本的字符范围。
+
+    除原样匹配外，还会忽略空白和标点并保留原文字符映射。这样中文 ASR
+    输出中的分词空格与 LLM 返回的连续实体文本不会造成对齐失败。
+    """
 
     normalized_entity = " ".join(entity_text.split())
     if not normalized_entity:
@@ -1121,7 +1138,19 @@ def find_entity_char_range(transcript: str, entity_text: str) -> tuple[int, int]
     start = transcript.casefold().find(normalized_entity.casefold())
     if start >= 0:
         return start, start + len(normalized_entity)
-    return None
+
+    searchable_transcript, original_indices = _normalized_text_with_char_map(transcript)
+    searchable_entity = normalize_text_for_match(entity_text)
+    if not searchable_entity:
+        return None
+    normalized_start = searchable_transcript.find(searchable_entity)
+    if normalized_start < 0:
+        return None
+    normalized_end = normalized_start + len(searchable_entity)
+    return (
+        original_indices[normalized_start],
+        original_indices[normalized_end - 1] + 1,
+    )
 
 
 def find_entity_token_range(
@@ -1201,9 +1230,25 @@ def merge_resolved_entity_groups(
 
 
 def normalize_text_for_match(value: str) -> str:
-    """轻量文本规整，用于匹配和去重。"""
+    """Unicode 友好的轻量文本规整，用于中英文匹配和去重。"""
 
-    return re.sub(r"[^0-9a-zA-Z]+", "", value.casefold())
+    normalized, _ = _normalized_text_with_char_map(value)
+    return normalized
+
+
+def _normalized_text_with_char_map(value: str) -> tuple[str, list[int]]:
+    """返回 NFKC/casefold 后的字母数字文本及其原文字符索引。"""
+
+    characters: list[str] = []
+    original_indices: list[int] = []
+    for original_index, character in enumerate(value):
+        folded = unicodedata.normalize("NFKC", character).casefold()
+        for normalized_character in folded:
+            if not normalized_character.isalnum():
+                continue
+            characters.append(normalized_character)
+            original_indices.append(original_index)
+    return "".join(characters), original_indices
 
 
 def safe_entity_id(value: str) -> str:
@@ -1237,6 +1282,7 @@ def _build_medical_review_spans(
     words: list[ASRWord],
     groups: list[ResolvedEntityGroup],
     *,
+    transcript: str,
     entities_by_id: dict[str, MedicalEntityMention],
     generated_by: str,
     thresholds: Any,
@@ -1262,7 +1308,7 @@ def _build_medical_review_spans(
         spans.append(
             UncertainSpan(
                 span_id=f"medspan_{len(spans) + 1:03d}",
-                text=" ".join(word.text for word in span_words),
+                text=join_asr_words(span_words, transcript=transcript),
                 start_word_index=group.start_word_index,
                 end_word_index=group.end_word_index,
                 start_sec=start_sec,

@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import traceback
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -105,6 +107,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
     parser.add_argument("--timeout-sec", type=float, default=60.0)
     parser.add_argument(
+        "--max-llm-retries",
+        type=int,
+        default=3,
+        help="单条实体抽取遇到响应格式或瞬时请求错误时的最大尝试次数。",
+    )
+    parser.add_argument(
+        "--llm-workers",
+        type=int,
+        default=1,
+        help="并发 LLM 请求数；默认 1，建议全量任务使用 4。",
+    )
+    parser.add_argument(
         "--force-refresh-entities",
         action="store_true",
         help="忽略已有实体缓存，重新调用 LLM。",
@@ -125,6 +139,10 @@ def run(args: argparse.Namespace) -> tuple[list[ASRConfidenceRecord], dict[str, 
     env_file = resolve_optional_env_file(args.env_file)
 
     records = read_asr_confidence_jsonl(input_jsonl)
+    if args.max_llm_retries <= 0:
+        raise ValueError("--max-llm-retries 必须大于 0")
+    if args.llm_workers <= 0:
+        raise ValueError("--llm-workers 必须大于 0")
     if args.limit is not None:
         if args.limit <= 0:
             raise ValueError("--limit 必须大于 0")
@@ -139,33 +157,50 @@ def run(args: argparse.Namespace) -> tuple[list[ASRConfidenceRecord], dict[str, 
 
     output_records: list[ASRConfidenceRecord] = []
     extraction_records = []
-    cache_hits = 0
+    cache_hits = sum(
+        extraction_for_asr_record(record, cached_by_key) is not None
+        for record in records
+    )
     llm_calls = 0
     resolved_base_url = args.base_url
     resolved_model = args.model
 
-    for record in records:
-        extraction = extraction_for_asr_record(record, cached_by_key)
-        if extraction is not None:
-            cache_hits += 1
-        else:
-            llm_config = resolve_llm_api_config(
-                api_key_env=args.api_key_env,
-                dotenv_path=env_file,
-                base_url=args.base_url,
-                model_name=args.model,
-            )
-            resolved_base_url = llm_config.base_url
-            resolved_model = llm_config.model_name
-            entities = extract_medical_entities_with_llm(
-                record.asr_transcript,
-                api_key=llm_config.api_key,
-                base_url=llm_config.base_url,
-                model_name=llm_config.model_name,
-                timeout_sec=args.timeout_sec,
-            )
-            llm_calls += 1
-            extraction = build_medical_entity_extraction_record(
+    missing_records = [
+        record
+        for record in records
+        if extraction_for_asr_record(record, cached_by_key) is None
+    ]
+    new_extractions = []
+    if missing_records:
+        llm_config = resolve_llm_api_config(
+            api_key_env=args.api_key_env,
+            dotenv_path=env_file,
+            base_url=args.base_url,
+            model_name=args.model,
+        )
+        resolved_base_url = llm_config.base_url
+        resolved_model = llm_config.model_name
+
+        def extract_one(record: ASRConfidenceRecord) -> Any:
+            last_error: Exception | None = None
+            for attempt in range(1, args.max_llm_retries + 1):
+                try:
+                    entities = extract_medical_entities_with_llm(
+                        record.asr_transcript,
+                        api_key=llm_config.api_key,
+                        base_url=llm_config.base_url,
+                        model_name=llm_config.model_name,
+                        timeout_sec=args.timeout_sec,
+                    )
+                    break
+                except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+                    last_error = exc
+                    if attempt >= args.max_llm_retries:
+                        raise
+                    time.sleep(min(float(attempt), 2.0))
+            else:  # pragma: no cover - 循环要么 break，要么在最后一次抛出
+                raise RuntimeError("LLM 医学实体抽取重试结束但未返回结果") from last_error
+            return build_medical_entity_extraction_record(
                 record,
                 entities=entities,
                 model_name=llm_config.model_name,
@@ -173,6 +208,31 @@ def run(args: argparse.Namespace) -> tuple[list[ASRConfidenceRecord], dict[str, 
                 metadata={"generated_by": T038_GENERATED_BY},
             )
 
+        first_error: Exception | None = None
+        with ThreadPoolExecutor(max_workers=args.llm_workers) as executor:
+            futures = [executor.submit(extract_one, record) for record in missing_records]
+            for future in as_completed(futures):
+                try:
+                    new_extractions.append(future.result())
+                    llm_calls += 1
+                    # 外部 API 全量任务逐条落盘，复跑时只处理尚未缓存的 record。
+                    write_medical_entity_extractions_jsonl(
+                        [*cached_extractions, *new_extractions],
+                        entity_cache_jsonl,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 完成其余 future 后统一抛出
+                    if first_error is None:
+                        first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    cached_by_key = extraction_records_by_key(
+        [*cached_extractions, *new_extractions]
+    )
+    for record in records:
+        extraction = extraction_for_asr_record(record, cached_by_key)
+        if extraction is None:  # pragma: no cover - 缺失记录应已在上面生成
+            raise RuntimeError(f"医学实体缓存缺少 record：{record.sample_id}")
         extraction_records.append(extraction)
         output_records.append(
             apply_medical_entity_review_gating(
@@ -180,6 +240,19 @@ def run(args: argparse.Namespace) -> tuple[list[ASRConfidenceRecord], dict[str, 
                 extraction.entities,
                 generated_by=T038_GENERATED_BY,
             )
+        )
+
+    # 全缓存复跑时没有新 API 配置可回填；运行记录应沿用缓存中实际使用的
+    # 模型和服务地址，不能误写为代码默认值。
+    if resolved_model is None:
+        resolved_model = next(
+            (item.model_name for item in extraction_records if item.model_name),
+            None,
+        )
+    if resolved_base_url is None:
+        resolved_base_url = next(
+            (item.base_url for item in extraction_records if item.base_url),
+            None,
         )
 
     write_medical_entity_extractions_jsonl(extraction_records, entity_cache_jsonl)
@@ -265,6 +338,8 @@ def build_run_summary(
             "model": resolved_model or args.model or DEFAULT_PARATERA_MODEL,
             "api_key_env": args.api_key_env,
             "timeout_sec": args.timeout_sec,
+            "max_llm_retries": args.max_llm_retries,
+            "llm_workers": args.llm_workers,
             "force_refresh_entities": args.force_refresh_entities,
             "limit": args.limit,
         },

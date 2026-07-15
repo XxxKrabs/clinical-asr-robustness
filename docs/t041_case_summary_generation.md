@@ -145,3 +145,66 @@ outputs/primock57/t041_case_summary_generation/t041_case_summary_generation_run.
 - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python -m ruff check src/clinical_asr_robustness/case_summary_generation.py scripts/generate_case_summaries.py tests/test_case_summary_generation.py`：All checks passed；
 - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/generate_case_summaries.py`：成功生成 T041 prompt-ready summary；
 - `wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/generate_case_summaries.py --run-llm`：成功生成 2 条 consultation-level 结构化病例摘要，summary 中 `status_counts={"generated": 2}`。
+
+## 2026-07-09 T042b 三类输入对齐更新
+
+T041 入口现已支持通过 `--input-variants` 对 noisy ASR、confirmed transcript 和 reference oracle 生成同一 schema 的 consultation-level 病例摘要任务记录。逐条 records 会记录 `input_variant`、`prompt_version`、`model`（dry-run 为 `null`，`--run-llm` 后记录模型元数据）、`research_use_only` 和 `clinical_use_warning`。
+
+T042b dry-run 命令：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/generate_case_summaries.py `
+  --input-variants noisy_asr confirmed_transcript reference_oracle `
+  --output-dir outputs/primock57/t042_case_summary_variant_generation `
+  --records-name primock57_t042_case_summary_variant_records.jsonl `
+  --summary-name primock57_t042_case_summary_variant_summary.json `
+  --run-config-name t042_case_summary_variant_generation_run.json
+```
+
+本轮 dry-run 生成 6 条 prompt-ready consultation-level 任务记录：三类 `input_variant` 各 2 条，合计复用 9 条 source record，`records_skipped=0`。聚合 summary 不包含 transcript 或 prompt 正文；records JSONL 含完整 transcript 和 prompt，默认只放在 `outputs/`，不提交 Git。
+
+## 2026-07-13 字段条件化说话人软权重
+
+病例摘要 prompt 升级为 `case_summary_prompt/v3_input_variant_role_field_weighting`。默认使用 `field_conditioned_v1`，将医生/患者角色作为不同摘要字段的相对证据优先级；也可使用 `role_blind` 生成不区分角色权重的消融基线。
+
+| 字段 | doctor | patient | 设计意图 |
+|---|---:|---:|---|
+| `chief_complaint` / `history_of_present_illness` | 0.9 | 1.2 | 主诉与病程优先患者自述 |
+| `symptoms` / `negated_or_absent_symptoms` | 0.9 | 1.2 | 症状及否定症状优先患者证据 |
+| `relevant_history` | 1.0 | 1.2 | 病史优先患者自述，保留医生复述 |
+| `medications` | 1.2 | 1.0 | 患者当前/既往用药仍保留；医生新开药、剂量调整优先 |
+| `tests_or_exam_mentioned` | 1.3 | 0.9 | 检查结果与解释优先医生证据 |
+| `assessment_mentioned` / `plan_mentioned` | 1.5 | 0.8 | 评估和计划优先医生陈述 |
+
+这些数值只是 prompt 中的相对证据排序先验，不是事实真实性概率。硬性约束包括：
+
+- 医生提问不算事实陈述；
+- 患者主诉、症状、否定症状和病史不能仅因来自患者而被省略；
+- 医患在否定、时间、剂量、检查结果或计划上冲突时，不得用高权重一方静默覆盖另一方，应保留归因并写入 `uncertainty_notes`；
+- 证据权重不参与 gold key facts 构造，避免评测标签偏置。
+
+默认字段条件化生成：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/generate_case_summaries.py `
+  --evidence-weighting-profile field_conditioned_v1
+```
+
+角色盲消融：
+
+```powershell
+wsl.exe -d Ubuntu-22.04 -e /home/krabs/miniforge3/envs/clinical-asr/bin/python scripts/generate_case_summaries.py `
+  --evidence-weighting-profile role_blind
+```
+
+逐条 generation record、聚合 summary 和 run config 均记录 `evidence_weighting_profile`/完整字段权重，但聚合文件不包含 transcript 正文。后续正式实验应在同一模型、同一 input variants、同一解码参数下对比两种 profile，并复用 T042 的事实级指标。
+
+验证结果：目标测试 `8 passed`，全量测试 `80 passed`，目标 ruff 检查通过；两个 profile 均完成 1 条 noisy ASR 的 dry-run，summary 分别记录 `soft_prompt_role_field_prior` 与 `role_blind_ablation`，且 `summary_contains_full_transcript_text=false`。
+
+## 2026-07-13 T046 全量消融结果
+
+已在同一批 57 条 noisy ASR consultation、同一 `Qwen3-Coder-Plus`、`temperature=0`、同一英文 schema 和同一 516 条自动 gold facts 下完成 `role_blind` / `field_conditioned_v1` 正式对照。英文输出用于对齐英文 transcript 与英文 gold facts；首次中文批次因语言错配未纳入结论。
+
+`field_conditioned_v1` 相对 `role_blind`：micro F1 0.1903 → 0.1763（-0.0140），Critical recall 0.2778 → 0.2556，Unsupported +85，Omission +6。本轮没有观察到质量提升。详细设计、配对分析与展示图见 `docs/t046_speaker_weight_ablation.md`。
+
+为支持全量调用，生成入口新增 `--workers` 和 `--max-attempts`；默认值均为 1，旧运行方式不变。

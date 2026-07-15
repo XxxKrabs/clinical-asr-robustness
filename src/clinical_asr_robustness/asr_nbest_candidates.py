@@ -13,6 +13,7 @@ import math
 import re
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
@@ -25,6 +26,7 @@ from clinical_asr_robustness.asr_confidence import (
     ASRConfidenceRecord,
     ASRWord,
     ConfidenceLevel,
+    join_asr_words,
 )
 from clinical_asr_robustness.medical_entity_review import (
     DEFAULT_API_KEY_ENV,
@@ -49,6 +51,12 @@ DEFAULT_AUX_MIN_SIMILARITY = 0.55
 DEFAULT_LLM_WORD_CONTEXT_WINDOW = 5
 DEFAULT_LLM_WORD_CANDIDATES = 3
 DEFAULT_LLM_WORD_LEXICON_TERMS = 24
+DEFAULT_LLM_CANDIDATE_PROMPT_PROFILE = "generic_clinical_asr_v1"
+CHINESE_DBS_LLM_CANDIDATE_PROMPT_PROFILE = "zh_dbs_remote_programming_v1"
+LLM_CANDIDATE_PROMPT_PROFILES = {
+    DEFAULT_LLM_CANDIDATE_PROMPT_PROFILE,
+    CHINESE_DBS_LLM_CANDIDATE_PROMPT_PROFILE,
+}
 
 LLMWordCandidateGenerator = Callable[
     [list[dict[str, str]]],
@@ -407,6 +415,153 @@ def normalize_sequence_nbest_items(
     return normalized
 
 
+def build_llm_conversation_contexts(
+    records: Iterable[ASRConfidenceRecord],
+) -> dict[str, dict[str, Any]]:
+    """为每条记录构造不含 reference 的 consultation-level 完整 ASR 对话。"""
+
+    grouped: dict[tuple[str, str], list[ASRConfidenceRecord]] = defaultdict(list)
+    for record in records:
+        consultation_id = str(record.consultation_id or record.sample_id)
+        grouped[(record.dataset, consultation_id)].append(record)
+
+    contexts: dict[str, dict[str, Any]] = {}
+    for (dataset, consultation_id), group in grouped.items():
+        ordered = sorted(group, key=_asr_record_time_sort_key)
+        turns: list[dict[str, Any]] = []
+        for record in ordered:
+            run_start = 0
+            current_identity = (
+                _speaker_identity_for_asr_word(record, record.asr_words[0])
+                if record.asr_words
+                else ("speaker_unknown", None, "diarization_missing")
+            )
+            for position in range(1, len(record.asr_words) + 1):
+                next_identity = (
+                    _speaker_identity_for_asr_word(record, record.asr_words[position])
+                    if position < len(record.asr_words)
+                    else None
+                )
+                if next_identity == current_identity:
+                    continue
+                run_words = record.asr_words[run_start:position]
+                if run_words:
+                    speaker_label, speaker_role, speaker_source = current_identity
+                    turns.append(
+                        {
+                            "speaker_label": speaker_label,
+                            "speaker_role": speaker_role,
+                            "speaker_label_source": speaker_source,
+                            "start_sec": next(
+                                (
+                                    word.start_sec
+                                    for word in run_words
+                                    if word.start_sec is not None
+                                ),
+                                None,
+                            ),
+                            "end_sec": next(
+                                (
+                                    word.end_sec
+                                    for word in reversed(run_words)
+                                    if word.end_sec is not None
+                                ),
+                                None,
+                            ),
+                            "text": join_asr_words(
+                                run_words,
+                                transcript=record.asr_transcript,
+                            ),
+                            "sample_id": record.sample_id,
+                        }
+                    )
+                elif record.asr_transcript.strip():
+                    turns.append(
+                        {
+                            "speaker_label": "speaker_unknown",
+                            "speaker_role": None,
+                            "speaker_label_source": "diarization_missing",
+                            "start_sec": None,
+                            "end_sec": None,
+                            "text": record.asr_transcript,
+                            "sample_id": record.sample_id,
+                        }
+                    )
+                run_start = position
+                current_identity = next_identity
+
+        context = {
+            "scope": "complete_consultation_asr",
+            "dataset": dataset,
+            "consultation_id": consultation_id,
+            "turns": turns,
+            "speaker_labeled_transcript": "\n".join(
+                f"[{turn.get('speaker_role') or turn['speaker_label']}] {turn['text']}"
+                for turn in turns
+            ),
+            "source_record_count": len(ordered),
+            "reference_used": False,
+            "note": (
+                "上下文只来自 ASR noisy transcript 和自动说话人标签；"
+                "speaker_unknown 表示说话人分离尚不可用。"
+            ),
+        }
+        for record in ordered:
+            contexts[record.sample_id] = context
+    return contexts
+
+
+def _asr_record_time_sort_key(record: ASRConfidenceRecord) -> tuple[float, str]:
+    starts = [
+        value
+        for value in [
+            *(word.start_sec for word in record.asr_words),
+            *(segment.start_sec for segment in record.asr_segments),
+        ]
+        if value is not None
+    ]
+    return (min(starts) if starts else float("inf"), record.sample_id)
+
+
+def _speaker_identity_for_asr_word(
+    record: ASRConfidenceRecord,
+    word: ASRWord,
+) -> tuple[str, str | None, str]:
+    role = _speaker_role_from_candidate_metadata(word.metadata)
+    direct = _meaningful_candidate_speaker_label(word.speaker_label)
+    if direct:
+        return direct, role, "word.speaker_label"
+    for segment in record.asr_segments:
+        if segment.start_word_index <= word.word_index < segment.end_word_index:
+            segment_label = _meaningful_candidate_speaker_label(segment.speaker_label)
+            if segment_label:
+                segment_role = role or _speaker_role_from_candidate_metadata(segment.metadata)
+                return segment_label, segment_role, "segment.speaker_label"
+    channel = record.source_channel.value
+    if channel not in {"mixed", "unknown"}:
+        return channel, role or channel, "record.source_channel"
+    return "speaker_unknown", role, "diarization_missing"
+
+
+def _meaningful_candidate_speaker_label(value: str | None) -> str | None:
+    label = str(value or "").strip()
+    if not label or label.casefold() in {"mixed", "unknown", "speaker_unknown"}:
+        return None
+    return label
+
+
+def _speaker_role_from_candidate_metadata(metadata: dict[str, Any]) -> str | None:
+    role = metadata.get("speaker_role")
+    if isinstance(role, str) and role.strip():
+        return role.strip()
+    diarization = metadata.get("diarization")
+    if isinstance(diarization, dict):
+        nested_role = diarization.get("speaker_role") or diarization.get("role")
+        if isinstance(nested_role, str) and nested_role.strip():
+            return nested_role.strip()
+    return None
+
+
 
 def build_llm_word_candidate_prompt_records(
     record: ASRConfidenceRecord,
@@ -414,6 +569,8 @@ def build_llm_word_candidate_prompt_records(
     medical_candidate_lexicon: dict[str, Iterable[str]] | None = None,
     context_window_words: int = DEFAULT_LLM_WORD_CONTEXT_WINDOW,
     max_lexicon_terms: int = DEFAULT_LLM_WORD_LEXICON_TERMS,
+    prompt_profile: str = DEFAULT_LLM_CANDIDATE_PROMPT_PROFILE,
+    conversation_context: dict[str, Any] | None = None,
 ) -> list[LLMWordCandidatePrompt]:
     """Build prompt-ready LLM candidate requests for yellow/red words only."""
 
@@ -421,6 +578,8 @@ def build_llm_word_candidate_prompt_records(
         raise ValueError("context_window_words must be greater than or equal to 0")
     if max_lexicon_terms <= 0:
         raise ValueError("max_lexicon_terms must be greater than 0")
+    if prompt_profile not in LLM_CANDIDATE_PROMPT_PROFILES:
+        raise ValueError(f"unsupported LLM candidate prompt profile: {prompt_profile}")
 
     lexicon = normalize_medical_candidate_lexicon(medical_candidate_lexicon)
     prompts: list[LLMWordCandidatePrompt] = []
@@ -443,6 +602,8 @@ def build_llm_word_candidate_prompt_records(
                 span_text=span.text,
                 context=context,
                 medical_lexicon_terms=lexicon_terms,
+                prompt_profile=prompt_profile,
+                conversation_context=conversation_context,
             )
             level = _confidence_level_value(word.confidence_level)
             prompts.append(
@@ -465,6 +626,12 @@ def build_llm_word_candidate_prompt_records(
                         "source": LLM_WORD_AUX_SOURCE,
                         "alignment_method": LLM_WORD_ALIGNMENT_METHOD,
                         "candidate_scope": "word",
+                        "prompt_profile": prompt_profile,
+                        "context_scope": (
+                            "complete_consultation"
+                            if conversation_context is not None
+                            else "local_window"
+                        ),
                         "entity_types": list(entity_types),
                         "reference_used": False,
                         "research_use_only": True,
@@ -506,10 +673,10 @@ def build_word_candidate_context(
     right_words = words[target_word_index + 1 : right_end]
     window_words = words[left_start:right_end]
     return {
-        "left_text": " ".join(word.text for word in left_words),
+        "left_text": join_asr_words(left_words, transcript=record.asr_transcript),
         "target_text": target_word.text,
-        "right_text": " ".join(word.text for word in right_words),
-        "window_text": " ".join(word.text for word in window_words),
+        "right_text": join_asr_words(right_words, transcript=record.asr_transcript),
+        "window_text": join_asr_words(window_words, transcript=record.asr_transcript),
         "target_word_index": target_word.word_index,
         "window_start_word_index": left_start,
         "window_end_word_index": right_end,
@@ -555,11 +722,17 @@ def build_llm_word_candidate_messages(
     span_text: str,
     context: dict[str, Any],
     medical_lexicon_terms: Iterable[str],
+    prompt_profile: str = DEFAULT_LLM_CANDIDATE_PROMPT_PROFILE,
+    conversation_context: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build the LLM prompt for one yellow/red ASR word."""
 
+    if prompt_profile not in LLM_CANDIDATE_PROMPT_PROFILES:
+        raise ValueError(f"unsupported LLM candidate prompt profile: {prompt_profile}")
+
     payload = {
         "task": "generate_candidate_replacements_for_one_uncertain_asr_word",
+        "prompt_profile": prompt_profile,
         "target_word": {
             "word_index": target_word.word_index,
             "text": target_word.text,
@@ -568,6 +741,7 @@ def build_llm_word_candidate_messages(
         },
         "review_span_text": span_text,
         "local_context": context,
+        "complete_conversation_context": conversation_context,
         "medical_lexicon_reference": list(medical_lexicon_terms),
         "requirements": [
             "Return about 3 candidate replacement words or short medical terms.",
@@ -577,13 +751,31 @@ def build_llm_word_candidate_messages(
             "Return strict JSON only: {\"candidates\": [\"...\", \"...\"]}.",
         ],
     }
+    if prompt_profile == CHINESE_DBS_LLM_CANDIDATE_PROMPT_PROFILE:
+        payload["task"] = "为一个中文神经调控对话中的低置信ASR单元生成候选替换"
+        payload["requirements"] = [
+            "结合完整病例对话、说话人标签、目标局部上下文和术语提示，返回最多3个最可能的短候选。",
+            "候选只替换目标ASR单元；不要改写整句或整段，也不要补充原音频中未说出的事实。",
+            "重点核对DBS术语、药名、症状、否定词、左右侧、数字、单位和程控参数。",
+            "术语表只作提示，不代表正确答案；无法可靠生成时允许返回空数组。",
+            "模型没有听到音频，不得声称候选来自听辨；候选必须等待医生回听确认。",
+            "不提供诊疗建议，只做ASR候选支持。",
+            "仅返回严格JSON：{\"candidates\":[\"候选1\",\"候选2\"]}。",
+        ]
+        system_content = (
+            "你是中文神经调控医患对话的ASR候选词生成器。"
+            "你只生成保守、最小范围的转写候选，不进行临床推断。"
+            "完整对话是noisy ASR上下文，不是reference。仅返回严格JSON。"
+        )
+    else:
+        system_content = (
+            "You generate candidate replacements for uncertain ASR words in "
+            "clinical conversation transcripts. Return strict JSON only."
+        )
     return [
         {
             "role": "system",
-            "content": (
-                "You generate candidate replacements for uncertain ASR words in "
-                "clinical conversation transcripts. Return strict JSON only."
-            ),
+            "content": system_content,
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
     ]
@@ -737,6 +929,8 @@ def attach_nbest_candidates_to_record(
     max_llm_word_candidates: int = DEFAULT_LLM_WORD_CANDIDATES,
     llm_word_context_window: int = DEFAULT_LLM_WORD_CONTEXT_WINDOW,
     max_llm_lexicon_terms: int = DEFAULT_LLM_WORD_LEXICON_TERMS,
+    llm_candidate_prompt_profile: str = DEFAULT_LLM_CANDIDATE_PROMPT_PROFILE,
+    llm_conversation_context: dict[str, Any] | None = None,
 ) -> ASRConfidenceRecord:
     """Attach sequence/span alternatives to one ASR confidence record.
 
@@ -761,6 +955,10 @@ def attach_nbest_candidates_to_record(
         raise ValueError("llm_word_context_window must be greater than or equal to 0")
     if max_llm_lexicon_terms <= 0:
         raise ValueError("max_llm_lexicon_terms must be greater than 0")
+    if llm_candidate_prompt_profile not in LLM_CANDIDATE_PROMPT_PROFILES:
+        raise ValueError(
+            f"unsupported LLM candidate prompt profile: {llm_candidate_prompt_profile}"
+        )
 
     existing_to_keep = [
         alternative
@@ -781,6 +979,8 @@ def attach_nbest_candidates_to_record(
             medical_candidate_lexicon=normalized_medical_lexicon,
             context_window_words=llm_word_context_window,
             max_lexicon_terms=max_llm_lexicon_terms,
+            prompt_profile=llm_candidate_prompt_profile,
+            conversation_context=llm_conversation_context,
         ):
             llm_prompts_by_span.setdefault(prompt.span_id, []).append(prompt)
 
@@ -1063,6 +1263,12 @@ def attach_nbest_candidates_to_record(
             "max_llm_word_candidates": max_llm_word_candidates,
             "context_window_words": llm_word_context_window,
             "max_lexicon_terms": max_llm_lexicon_terms,
+            "prompt_profile": llm_candidate_prompt_profile,
+            "context_scope": (
+                "complete_consultation"
+                if llm_conversation_context is not None
+                else "local_window"
+            ),
             "reference_used": False,
         }
         updated_spans.append(
@@ -1124,6 +1330,12 @@ def attach_nbest_candidates_to_record(
         "max_llm_word_candidates": max_llm_word_candidates,
         "context_window_words": llm_word_context_window,
         "max_lexicon_terms": max_llm_lexicon_terms,
+        "prompt_profile": llm_candidate_prompt_profile,
+        "context_scope": (
+            "complete_consultation"
+            if llm_conversation_context is not None
+            else "local_window"
+        ),
         "reference_used": False,
         "note": (
             "T044 generates candidate replacements only for yellow/red ASR words. "

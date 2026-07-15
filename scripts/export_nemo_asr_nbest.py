@@ -13,11 +13,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import traceback
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from clinical_asr_robustness.dataset_profiles import resolve_dataset_profile
 from clinical_asr_robustness.nemo_confidence_export import to_jsonable
 from clinical_asr_robustness.nemo_nbest_export import (
     DEFAULT_NBEST_SOURCE,
@@ -186,14 +189,20 @@ def chunked(items: list[Any], chunk_size: int) -> list[list[Any]]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL)
-    parser.add_argument("--output-jsonl", type=Path, default=DEFAULT_OUTPUT_JSONL)
-    parser.add_argument("--run-config-json", type=Path, default=DEFAULT_RUN_CONFIG)
+    parser.add_argument("--dataset", default="auto")
+    parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument("--model-path", type=Path, default=None)
+    parser.add_argument("--output-jsonl", type=Path, default=None)
+    parser.add_argument("--run-config-json", type=Path, default=None)
     parser.add_argument("--sample-id", action="append", dest="sample_ids", default=None)
     parser.add_argument("--record-index", action="append", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument(
+        "--precision",
+        choices=["auto", "fp32", "fp16", "bf16"],
+        default="auto",
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--transcribe-chunk-size", type=int, default=1)
@@ -217,12 +226,32 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="默认要求 nemo 来自 project/third_party/speech_main；仅调试时放宽。",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    manifest_hint = resolve_project_path(args.manifest) if args.manifest else None
+    profile = resolve_dataset_profile(dataset=args.dataset, manifest_path=manifest_hint)
+    args.dataset = profile.dataset_id
+    args.dataset_language = profile.language
+    if args.manifest is None:
+        args.manifest = profile.default_manifest
+    if args.model_path is None:
+        args.model_path = profile.default_model_path
+    if args.output_jsonl is None:
+        args.output_jsonl = profile.output_path(
+            "t037_nemo_asr_nbest",
+            f"{profile.dataset_id}_sequence_nbest.jsonl",
+        )
+    if args.run_config_json is None:
+        args.run_config_json = profile.output_path(
+            "t037_nemo_asr_nbest",
+            "t037_nemo_asr_nbest_run.json",
+        )
+    return args
 
 
 def run_export(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """执行 T037 n-best 导出。"""
 
+    run_started = time.perf_counter()
     manifest_path = resolve_project_path(args.manifest)
     model_path = resolve_project_path(args.model_path)
     output_jsonl = resolve_project_path(args.output_jsonl)
@@ -238,6 +267,13 @@ def run_export(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str
         record_indices=args.record_index,
         limit=args.limit,
     )
+    record_datasets = {
+        str(record.get("dataset")) for record in selected_records if record.get("dataset")
+    }
+    if record_datasets and record_datasets != {args.dataset}:
+        raise ValueError(
+            f"CLI/自动路由数据集 {args.dataset} 与 manifest 不一致：{sorted(record_datasets)}"
+        )
     audio_paths = validate_input_files(selected_records, model_path)
     if ngram_lm_model is not None and not ngram_lm_model.exists():
         raise FileNotFoundError(f"ngram LM 文件不存在：{ngram_lm_model}")
@@ -274,10 +310,17 @@ def run_export(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str
         device = args.device
     if device == "cuda" and not cuda_available:
         raise RuntimeError("指定 --device cuda，但 torch.cuda.is_available() 为 False")
+    precision = args.precision
+    if precision == "auto":
+        precision = "fp16" if device == "cuda" else "fp32"
+    if device != "cuda" and precision in {"fp16", "bf16"}:
+        raise ValueError("CPU n-best 当前只支持 fp32 precision")
 
+    restore_started = time.perf_counter()
     model = ASRModel.restore_from(restore_path=str(model_path), map_location="cpu")
     model.to(device)
     model.eval()
+    restore_elapsed_sec = time.perf_counter() - restore_started
     decoding_config = configure_ctc_beam_nbest(
         model,
         strategy=args.beam_strategy,
@@ -291,6 +334,8 @@ def run_export(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str
 
     runtime = {
         "device": device,
+        "precision": precision,
+        "restore_elapsed_sec": restore_elapsed_sec,
         "torch_version": torch.__version__,
         "cuda_available": cuda_available,
         "cuda_device": torch.cuda.get_device_name(0) if cuda_available else None,
@@ -304,6 +349,8 @@ def run_export(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str
         "model_name": model_path.stem,
         "model_path": path_for_record(model_path),
         "model_class": f"{model.__class__.__module__}.{model.__class__.__name__}",
+        "language": args.dataset_language,
+        "decoder_type": decoding_config.get("project_decoder_type"),
     }
     decoding_summary = {
         "strategy": args.beam_strategy,
@@ -341,6 +388,9 @@ def run_export(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str
     )
 
     generated_at_utc = datetime.now(timezone.utc)
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    transcribe_started = time.perf_counter()
     output_records: list[dict[str, Any]] = []
     processed = 0
     for record_chunk, audio_chunk in zip(
@@ -348,10 +398,11 @@ def run_export(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str
         chunked(audio_paths, args.transcribe_chunk_size),
         strict=True,
     ):
-        transcription_result = model.transcribe(
-            audio=[str(path) for path in audio_chunk],
-            override_config=transcribe_config,
-        )
+        with autocast_context(torch, device=device, precision=precision):
+            transcription_result = model.transcribe(
+                audio=[str(path) for path in audio_chunk],
+                override_config=transcribe_config,
+            )
         nbest_groups = flatten_nbest_transcription_results(transcription_result)
         if len(nbest_groups) != len(record_chunk):
             raise RuntimeError(
@@ -376,6 +427,31 @@ def run_export(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str
             processed += 1
             print(f"[{processed}/{len(selected_records)}] {manifest_record.get('sample_id')}")
 
+    transcribe_elapsed_sec = time.perf_counter() - transcribe_started
+    total_audio_duration_sec = sum(
+        float(record.get("duration_sec") or record.get("duration") or 0.0)
+        for record in selected_records
+    )
+    runtime.update(
+        {
+            "transcribe_elapsed_sec": transcribe_elapsed_sec,
+            "total_elapsed_sec": time.perf_counter() - run_started,
+            "total_audio_duration_sec": total_audio_duration_sec,
+            "real_time_factor": (
+                transcribe_elapsed_sec / total_audio_duration_sec
+                if total_audio_duration_sec > 0
+                else None
+            ),
+            "cuda_peak_memory_allocated_bytes": (
+                int(torch.cuda.max_memory_allocated()) if device == "cuda" else None
+            ),
+            "cuda_peak_memory_reserved_bytes": (
+                int(torch.cuda.max_memory_reserved()) if device == "cuda" else None
+            ),
+        }
+    )
+    for record in output_records:
+        record["runtime"] = {**record.get("runtime", {}), **runtime}
     write_nbest_jsonl(output_records, output_jsonl)
     run_summary = build_run_summary(
         manifest_path=manifest_path,
@@ -413,6 +489,8 @@ def build_run_summary(
     return {
         "task_id": "T037",
         "status": "ok",
+        "dataset": args.dataset,
+        "language": args.dataset_language,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "project_root": str(PROJECT_ROOT),
         "inputs": {
@@ -451,6 +529,13 @@ def build_run_summary(
             "research_use_only": all(record.get("research_use_only") for record in output_records),
         },
     }
+
+
+def autocast_context(torch_module: Any, *, device: str, precision: str) -> Any:
+    if device != "cuda" or precision == "fp32":
+        return nullcontext()
+    dtype = torch_module.float16 if precision == "fp16" else torch_module.bfloat16
+    return torch_module.autocast(device_type="cuda", dtype=dtype)
 
 
 def write_run_config(record: dict[str, Any], output_path: Path) -> None:

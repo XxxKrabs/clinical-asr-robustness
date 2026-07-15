@@ -58,7 +58,7 @@ def make_demo_record() -> ASRConfidenceRecord:
                 text="reports",
                 start_sec=0.4,
                 end_sec=0.8,
-                confidence=0.77,
+                confidence=0.85,
             ),
             ASRWord(
                 word_index=2,
@@ -173,6 +173,6 @@ def test_asr_confidence_schema_validates_references_and_ranges() -> None:
 
 def test_confidence_level_thresholds() -> None:
     assert confidence_level_for_score(0.9) == ConfidenceLevel.GREEN
-    assert confidence_level_for_score(0.5) == ConfidenceLevel.YELLOW
-    assert confidence_level_for_score(0.49) == ConfidenceLevel.RED
+    assert confidence_level_for_score(0.8) == ConfidenceLevel.YELLOW
+    assert confidence_level_for_score(0.79) == ConfidenceLevel.RED
     assert confidence_level_for_score(None) == ConfidenceLevel.UNKNOWN

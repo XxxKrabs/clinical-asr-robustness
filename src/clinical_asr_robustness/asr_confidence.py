@@ -19,6 +19,8 @@ from clinical_asr_robustness._compat import StrEnum
 
 ASR_CONFIDENCE_RECORD_VERSION = "asr_confidence_record/v1"
 CLINICAL_USE_WARNING = "本记录仅用于研究评估，不构成临床建议。"
+DEFAULT_GREEN_MIN = 0.90
+DEFAULT_YELLOW_MIN = 0.80
 
 
 class SourceChannel(StrEnum):
@@ -69,15 +71,18 @@ class ConfidenceThresholds(BaseModel):
     """绿/黄/红分级阈值。
 
     默认规则：
-    - green: score >= 0.80
-    - yellow: 0.50 <= score < 0.80
-    - red: score < 0.50
+    - green: score >= 0.90
+    - yellow: 0.80 <= score < 0.90
+    - red: score < 0.80
+
+    该默认值是基于 PriMock57 + NeMo 原生 word confidence 当前分数尺度选择的
+    研究性操作点，不代表跨模型或临床级校准阈值。调用方仍可显式覆盖。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    green_min: float = Field(default=0.80, ge=0.0, le=1.0)
-    yellow_min: float = Field(default=0.50, ge=0.0, le=1.0)
+    green_min: float = Field(default=DEFAULT_GREEN_MIN, ge=0.0, le=1.0)
+    yellow_min: float = Field(default=DEFAULT_YELLOW_MIN, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def validate_threshold_order(self) -> ConfidenceThresholds:
@@ -105,10 +110,10 @@ def confidence_level_for_score(
 
 
 class ASRWord(BaseModel):
-    """ASR 输出中的一个词级单元。
+    """ASR 输出中的一个可审阅文本单元（英文词、中文词/字或 subword）。
 
     `word_index` 是在 `asr_words` 中的 0-based 位置。正式导出时以
-    `asr_transcript.split()` 的词序为锚点，而不是以 timestamp 数量为锚点。
+    `asr_words` 的稳定顺序和字符偏移为锚点，而不是假定文本一定以空格分词。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -406,10 +411,10 @@ class ASRConfidenceRecord(BaseModel):
                 self.confidence.thresholds,
             )
 
-        transcript_word_count = len(self.asr_transcript.split())
-        if self.alignment.transcript_word_count != transcript_word_count:
+        transcript_unit_count = len(self.asr_words)
+        if self.alignment.transcript_word_count != transcript_unit_count:
             raise ValueError(
-                "alignment.transcript_word_count 必须等于 asr_transcript.split() 数量"
+                "alignment.transcript_word_count 必须等于 asr_words 文本单元数量"
             )
         if self.alignment.asr_word_count != len(self.asr_words):
             raise ValueError("alignment.asr_word_count 必须等于 asr_words 数量")
@@ -420,6 +425,12 @@ class ASRConfidenceRecord(BaseModel):
                     f"asr_words 必须按 0-based word_index 连续排列："
                     f"期望 {expected_index}，实际 {word.word_index}"
                 )
+            if word.char_start is not None and word.char_end is not None:
+                surface = self.asr_transcript[word.char_start : word.char_end]
+                if surface != word.text:
+                    raise ValueError(
+                        f"asr_words 字符偏移与 transcript 不一致：{word.word_index}"
+                    )
 
         segment_ids = [segment.segment_id for segment in self.asr_segments]
         if len(segment_ids) != len(set(segment_ids)):
@@ -457,6 +468,7 @@ class ASRConfidenceRecord(BaseModel):
                     )
         return self
 
+
     def alternatives_for_span(self, span_id: str) -> list[ASRAlternative]:
         """按 rank 返回某个 uncertain span 的候选。"""
 
@@ -473,6 +485,33 @@ class ASRConfidenceRecord(BaseModel):
         """返回某个 span 覆盖的词。"""
 
         return self.asr_words[span.start_word_index : span.end_word_index]
+
+
+def join_asr_words(
+    words: Iterable[ASRWord],
+    *,
+    transcript: str | None = None,
+) -> str:
+    """按字符偏移/原始分隔符拼回文本，避免给中文静默插入空格。"""
+
+    units = list(words)
+    if not units:
+        return ""
+    if transcript is not None:
+        start = units[0].char_start
+        end = units[-1].char_end
+        if start is not None and end is not None:
+            return transcript[start:end]
+
+    pieces = [units[0].text]
+    for previous, current in zip(units[:-1], units[1:], strict=True):
+        separator = current.metadata.get("separator_before")
+        if not isinstance(separator, str):
+            previous_is_ascii_word = previous.text[-1:].isascii() and previous.text[-1:].isalnum()
+            current_is_ascii_word = current.text[:1].isascii() and current.text[:1].isalnum()
+            separator = " " if previous_is_ascii_word and current_is_ascii_word else ""
+        pieces.extend([separator, current.text])
+    return "".join(pieces)
 
 
 def read_asr_confidence_jsonl(path: str | Path) -> list[ASRConfidenceRecord]:

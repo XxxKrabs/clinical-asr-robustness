@@ -93,6 +93,30 @@ def test_ctc_frame_entropy_aggregates_to_word_confidence() -> None:
     assert result.word_confidences[0] > result.word_confidences[1]
 
 
+def test_ctc_surface_alignment_supports_chinese_character_units() -> None:
+    # token 0 同时覆盖“患”“者”，项目层允许两个可审阅字符共享同一 acoustic 证据。
+    frame_log_probs = log_probs(
+        [
+            [0.96, 0.01, 0.01, 0.02],
+            [0.01, 0.95, 0.02, 0.02],
+            [0.01, 0.02, 0.95, 0.02],
+        ]
+    )
+
+    result = compute_ctc_word_confidence(
+        frame_log_probs,
+        score_type="log_probs",
+        blank_id=3,
+        transcript="患者咳嗽",
+        transcript_units=list("患者咳嗽"),
+        token_texts_by_id={0: "▁患者", 1: "▁咳", 2: "嗽", 3: "<blank>"},
+    )
+
+    assert result.word_token_spans == [(0, 1), (0, 1), (1, 2), (2, 3)]
+    assert all(value is not None for value in result.word_confidences)
+    assert result.metadata["transcript_unit_source"] == "explicit_language_aware_units"
+
+
 def test_ctc_frame_artifact_roundtrip(tmp_path) -> None:
     frame_log_probs = log_probs(
         [

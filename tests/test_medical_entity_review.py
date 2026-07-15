@@ -192,6 +192,49 @@ def test_medical_entity_gating_keeps_only_medical_review_spans() -> None:
     assert sample.review_policy["target_scope"] == "llm_identified_medical_entities_only"
 
 
+def test_misaligned_llm_char_offsets_fall_back_to_entity_text() -> None:
+    record = make_record_from_words(
+        ["eating", "drinking", "okay", "weakness", "tingling"],
+    )
+    gated = apply_medical_entity_review_gating(
+        record,
+        [
+            MedicalEntityMention(
+                text="weakness",
+                entity_type="symptom",
+                start_char=0,
+                end_char=6,
+            )
+        ],
+    )
+
+    review = [
+        word.metadata[MEDICAL_ENTITY_REVIEW_METADATA_KEY]["is_medical_entity"]
+        for word in gated.asr_words
+    ]
+    assert review == [False, False, False, True, False]
+
+
+def test_chinese_entity_matching_ignores_asr_spaces_and_preserves_word_range() -> None:
+    record = make_record_from_words(
+        ["患者", "左", "侧", "肢体", "震颤"],
+        confidences=[0.95, 0.75, 0.72, 0.45, 0.93],
+    )
+
+    gated = apply_medical_entity_review_gating(
+        record,
+        [MedicalEntityMention(text="左侧肢体", entity_type="anatomy")],
+    )
+
+    metadata = gated.metadata[MEDICAL_ENTITY_REVIEW_METADATA_KEY]
+    assert metadata["matched_entity_count"] == 1
+    assert metadata["medical_words_colored"] == [1, 2, 3]
+    assert len(gated.uncertain_spans) == 1
+    assert gated.uncertain_spans[0].start_word_index == 1
+    assert gated.uncertain_spans[0].end_word_index == 4
+    assert gated.uncertain_spans[0].text == "左侧肢体"
+
+
 def test_medical_entity_postprocess_trims_question_words_and_drops_false_positives() -> None:
     record = make_record_from_words(
         [
